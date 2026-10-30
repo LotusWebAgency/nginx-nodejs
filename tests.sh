@@ -3,6 +3,7 @@
 #
 #   IMAGE=<ref> ./tests.sh                   runtime image
 #   IMAGE=<ref> TARGET=builder ./tests.sh    builder image
+#   NODE_MAJOR=<n>                           also assert the image runs that Node major
 #
 # Every container runs with --network none: requests are made from inside the
 # container, and the Loki mock listens on the container's own loopback.
@@ -12,6 +13,7 @@ set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE to the image under test}"
 TARGET="${TARGET:-runtime}"
+NODE_MAJOR="${NODE_MAJOR:-}"
 LABEL="nginx-nodejs.tests=$$"
 pass=0
 fail=0
@@ -33,10 +35,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+node_major_is() {
+    docker run --rm --init --network none --label "$LABEL" --entrypoint /usr/bin/timeout "$IMAGE" 20 \
+        node -e "process.exit(process.versions.node.startsWith('$NODE_MAJOR.') ? 0 : 1)"
+}
+
 if [ "$TARGET" = builder ]; then
     check "builder: node and npm run as UID 1000 without nginx" \
         docker run --rm --init --network none --label "$LABEL" --entrypoint /usr/bin/timeout "$IMAGE" 20 \
         sh -c 'node --version && npm --version && test "$(id -u)" = 1000 && ! command -v nginx'
+    [ -z "$NODE_MAJOR" ] || check "builder: node is major $NODE_MAJOR" node_major_is
     finish
     exit
 fi
@@ -89,6 +97,7 @@ exit_code() {
 demo="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 "$IMAGE")"
 check "demo: healthcheck passes" wait_healthy "$demo"
 check "runs as UID/GID 1000" sh -c "[ \"\$(docker exec $demo id -u):\$(docker exec $demo id -g)\" = 1000:1000 ]"
+[ -z "$NODE_MAJOR" ] || check "node is major $NODE_MAJOR" node_major_is
 check "no setuid/setgid files" sh -c "[ -z \"\$(docker exec $demo find / -xdev -perm /6000 -type f)\" ]"
 expect "demo: Node answers /" "$demo" '.status == 200 and (.body | startswith("nginx-nodejs is running")) and .headers["cache-control"] == "no-store" and (.headers["x-request-id"] | length > 0)' GET /
 expect "demo: static file from STATIC_ROOT" "$demo" '.status == 200 and .headers["cache-control"] == "public, max-age=0"' GET /demo.txt
