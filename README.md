@@ -59,8 +59,9 @@ tests and the Trivy gate, never from the Dockerfile, so a tag cannot claim a Nod
 the image does not run.
 
 Each major tag follows the matching Wolfi `nodejs-<major>` package, so minor and patch
-releases arrive with rebuilds and the major never changes under a major tag. Nginx and the
-Wolfi base are not pinned either. `latest` moves to a newer major when one is added here, so
+releases arrive with rebuilds and the major never changes under a major tag. Nginx floats
+(`apk upgrade` runs on every rebuild); the Wolfi base is pinned by digest, which Renovate
+refreshes after CI verifies Chainguard's signature. `latest` moves to a newer major when one is added here, so
 production images should name a major (`24`) or, better, a `<major.minor>` tag or digest:
 
 ```dockerfile
@@ -79,16 +80,19 @@ keyless Cosign signature. See [Security and provenance](#security-and-provenance
 - **Nginx** (Wolfi `nginx-mainline`) with the **ngx_brotli** filter and static modules.
   ngx_brotli is built from a pinned upstream commit, checked by SHA-256, against the
   installed Nginx source, with a local patch for byte ranges and `416` responses
-  ([`docker/ngx_brotli-ranges.patch`](docker/ngx_brotli-ranges.patch)).
+  ([`docker/ngx_brotli-ranges.patch`](docker/ngx_brotli-ranges.patch)). The
+  **headers-more** module (pinned the same way) sets the security and cache headers, so a
+  `416` from the range filter carries each header once.
 - **s6** supervision with bounded `s6-log` writers.
 - **Fluent Bit**, compiled from a pinned upstream tag (`FLUENT_BIT_VERSION`, source tarball
   checked by `FLUENT_BIT_SHA256` in the Dockerfile), with only the plugins the collector needs
   (tail, grep, modify, record_modifier, Loki and null outputs, JSON and YAML, TLS, SQLite,
   disk backlog) and one header patch. It is built with stack protector, `_FORTIFY_SOURCE=3`,
-  stack-clash protection, PIE, full RELRO and (on amd64) `-fcf-protection`. The Brotli
+  stack-clash protection, PIE, full RELRO and (on amd64) `-fcf-protection`. The Nginx
   modules get the same flags.
-- Busybox without its network applets (`ping`, `netstat`, `traceroute`, ...). Wolfi's
-  busybox has no `wget` or `nc`.
+- Busybox with its network applet links removed (`ping`, `netstat`, `traceroute`, ...);
+  Wolfi's busybox has no `wget` or `nc`. The busybox binary still contains the applets and
+  Node itself can open sockets, so this is defense in depth, not a boundary.
 - CA certificates, so Loki over TLS verifies against the system store.
 
 The runtime has no npm and no application dependencies. Compilers stay in intermediate
@@ -205,6 +209,7 @@ mounted `noexec`; the image does not execute anything from either path):
 
 ```yaml
 spec:
+  terminationGracePeriodSeconds: 45
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000
@@ -288,7 +293,7 @@ variables are visible to your application. See [Send to Loki](#send-to-loki) for
 | `INGRESS_TRUSTED_IPS` | empty | Comma-separated IPs or CIDRs of trusted ingress proxies. None are trusted by default |
 | `NGINX_WORKER_PROCESSES` | from the CPU limit | Integer 1 to 64, or `auto`. Unset: `ceil(quota / period)` from cgroup v2 `cpu.max` (so `--cpus 1.5` gives 2), capped at the CPUs the container may use; with no quota, all of them |
 | `NGINX_WORKER_CONNECTIONS` | `4096` | Integer 64 to 65535. `worker_rlimit_nofile` is set to twice this plus 256, within the hard limit |
-| `NODE_MAX_OLD_SPACE_SIZE` | derived | Integer MB (at least 16) or `off`. Sets `--max-old-space-size` for the application only. Unset: with a cgroup v2 memory limit, 75% of the limit minus a 160 MB allowance for Nginx and the helper processes (floor 64 MB); with no limit, V8's default. Skipped when `NODE_OPTIONS` or the command already sets the flag |
+| `NODE_MAX_OLD_SPACE_SIZE` | derived | Integer MB (at least 16) or `off`. Sets `--max-old-space-size` for the application only. Unset: with a cgroup v2 memory limit, (limit - 160 MB) x 0.75, where 160 MB is the allowance for Nginx and the helper processes (floor 64 MB; 512 MB gives 264 MB); with no limit, V8's default. Skipped when `NODE_OPTIONS` (any spelling, such as `--max_old_space_size`) or the command already sets the flag |
 | `FLUENT_BIT_FILTERS_FILE` | unset | Mounted JSON array of extra collector filters, see [Logs](#logs) |
 
 `LOG_SERVICE` and `APP_ENV` take 1 to 64 letters, digits, underscores and hyphens, and
@@ -357,7 +362,10 @@ Conditional requests (`304`) work everywhere. Byte ranges work for files that ar
 compressed at request time: precompressed siblings (ranges address the encoded bytes) and
 types outside the compressible list, such as video, audio, PDF and archives. A range request for a compressible
 text file with no sibling is answered with the full compressed response (`200`), which
-HTTP allows. Proxied Node responses are never range-processed by Nginx. Consumer
+HTTP allows. Multi-range requests get the full file (`max_ranges 1`). Proxied Node responses
+are never range-processed by Nginx. Symlinks under the static root are followed only when
+link and target have the same owner (`disable_symlinks if_not_owner`); a link to anything
+else answers `404` and logs a `crit` line. Consumer
 policies belong in `routes.prod.conf`, `routes.dev.conf`, `proxy.conf` and `nginx.conf`
 under `/etc/nginx-nodejs`.
 
@@ -466,8 +474,13 @@ collector 10. Allow 45 seconds in total (`--stop-timeout 45`, `stop_grace_period
 - Rootless: UID and GID 1000 for every process, no setuid or setgid files in the image.
 - A read-only root filesystem, dropped capabilities, `no-new-privileges` and `noexec`
   tmpfs mounts are supported and tested; see [Hardened deployment](#hardened-deployment).
-- The compiled components (Fluent Bit, the Brotli modules) are checked for PIE, full RELRO,
-  a non-executable stack, stack protector and fortified libc calls.
+- The compiled components (Fluent Bit, the Nginx modules) are checked for PIE (executables),
+  no text relocations (modules), full RELRO, a non-executable stack and stack protector.
+  Fortification is observed where a binary imports `__*_chk` calls; the tests cannot tell
+  `_FORTIFY_SOURCE` levels apart.
+- `NODE_OPTIONS` reaches only your app process, not the supervisor, the helpers or the
+  HEALTHCHECK. `/__container_health` answers only the loopback TCP peer, whatever
+  `X-Forwarded-For` says.
 - Pull requests build, test and scan without publishing. A Trivy gate fails the build on
   any fixable CRITICAL or HIGH finding, any finding in CISA's Known Exploited
   Vulnerabilities catalog (fixable or not), and any AGPL license.
@@ -486,10 +499,10 @@ cosign verify \
   lotuswebagency/nginx-nodejs:latest
 ```
 
-Trivy reads the APK database, so it does not see Fluent Bit and ngx_brotli, which are
-compiled from source. Their versions are recorded in the image labels
-`com.lotuswebagency.fluent-bit.version` and `com.lotuswebagency.ngx-brotli.commit`, and pinned in
-the Dockerfile. Reporting, scope and boundaries: [SECURITY.md](SECURITY.md).
+Trivy reads the APK database, so it does not see Fluent Bit, ngx_brotli and headers-more,
+which are compiled from source. Their versions are recorded in the image labels
+`com.lotuswebagency.fluent-bit.version`, `com.lotuswebagency.ngx-brotli.commit` and
+`com.lotuswebagency.headers-more.commit`, and pinned in the Dockerfile. Reporting, scope and boundaries: [SECURITY.md](SECURITY.md).
 
 ## CI
 
@@ -522,7 +535,14 @@ Runtime checks:
 - Immutable `/assets/` against revalidating static files, and `no-store` for uncached and
   error responses.
 - Runtime Brotli and gzip, and precompressed `.gz` and `.br` siblings.
-- Byte ranges (including on both siblings and the plain `416`) and conditional `304`.
+- Byte ranges (including on both siblings and the plain `416`), multi-range requests
+  answered whole, and conditional `304`.
+- Each security header and `Cache-Control` exactly once on static `200`, `206`, `416`, `404`
+  and on proxied `200` and `500`.
+- Symlinks under the static root: out-of-tree targets answer `404`, same-owner links are served
+  (skipped when the tests run as root).
+- `NODE_OPTIONS` loaded by the app only, heap flags in underscore and mixed spellings, and
+  `/__container_health` refusing a forged `X-Forwarded-For` from a trusted ingress peer.
 - WebSocket upgrade, upstream connection reuse, and a range request that falls back to Node.
 - CPU and memory limits: `--cpus 2` gives 2 Nginx workers, `--memory 512m` caps the app
   heap, and the `NGINX_WORKER_PROCESSES` and `NODE_MAX_OLD_SPACE_SIZE` overrides apply.
@@ -537,9 +557,9 @@ Runtime checks:
   no capabilities, `no-new-privileges`, PID limit, `noexec` tmpfs mounts), and a restart
   without tmpfs.
 - `wget`, `nc` and the other busybox network applets are absent.
-- Fluent Bit and both Brotli modules: PIE or PIC, full RELRO, non-executable stack, stack
-  protector, fortified libc calls and, on amd64, the IBT note. These read the binaries with
-  the host's `readelf`.
+- Fluent Bit and the three Nginx modules: PIE (executables), no text relocations (modules),
+  full RELRO, non-executable stack, stack protector, fortification where `__*_chk` is
+  imported and, on amd64, the IBT note. These read the binaries with the host's `readelf`.
 - A Node child that exits stops the container with exit code 1.
 - An invalid `NODE_PORT` or a command that does not start with `node` exits with 78.
 
@@ -553,7 +573,7 @@ configuration with `fluent-bit --dry-run`.
 ## Build locally
 
 You need Docker Engine with Buildx, and binutils (`readelf`) on the host for the binary
-checks in `tests.sh`. Building compiles Fluent Bit and the Brotli modules
+checks in `tests.sh`. Building compiles Fluent Bit and the Nginx modules
 and downloads their sources from GitHub.
 
 ```sh
@@ -595,4 +615,4 @@ Security reports: [SECURITY.md](SECURITY.md). Tag lifecycle and rebuild cadence:
 [SUPPORT.md](SUPPORT.md).
 
 Packaging in this repository is MIT licensed, see [LICENSE](LICENSE). Node.js, Nginx,
-ngx_brotli, s6, Fluent Bit and the other bundled software keep their own upstream licenses.
+ngx_brotli, headers-more, s6, Fluent Bit and the other bundled software keep their own upstream licenses.

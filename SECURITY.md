@@ -37,8 +37,8 @@ cosign verify \
 ```
 
 The Wolfi base is pinned by digest and refreshed by Renovate. The weekly rebuild runs
-`apk upgrade` and picks up new Wolfi packages. Node.js and Nginx are not pinned, so a rebuild
-can bring a new Node version. Pin a `<major.minor>` tag or a digest if you need
+`apk upgrade` and picks up new Wolfi packages. Node.js and Nginx float with the Wolfi
+packages, so a rebuild can bring a new Node version. Pin a `<major.minor>` tag or a digest if you need
 a fixed one.
 
 ## Controls in the image
@@ -50,12 +50,18 @@ a fixed one.
   capabilities dropped, `no-new-privileges`, a PID limit and `noexec,nosuid,nodev` tmpfs
   mounts. [Hardened deployment](README.md#hardened-deployment) has the Docker, compose and
   Kubernetes settings.
-- Fluent Bit and the Brotli modules are compiled with stack protector, `_FORTIFY_SOURCE=3`,
-  stack-clash protection and full RELRO (Fluent Bit also as PIE, and `-fcf-protection` on
-  amd64). The tests check the produced binaries.
-- Busybox network applets (`ping`, `netstat`, `traceroute` and similar) are removed; Wolfi's
-  busybox has no `wget` or `nc`.
-- Node listens on loopback only. The internal static server listens on loopback only.
+- Fluent Bit and the Nginx modules (Brotli, headers-more) are compiled with stack protector,
+  `_FORTIFY_SOURCE=3`, stack-clash protection and full RELRO (Fluent Bit also as PIE, and
+  `-fcf-protection` on amd64). The tests check the produced binaries; they cannot tell
+  fortify levels apart, and observe fortification only where a binary imports `__*_chk` calls.
+- Busybox network applet links (`ping`, `netstat`, `traceroute` and similar) are removed; Wolfi's
+  busybox has no `wget` or `nc`. The binary still contains the applets and Node can open
+  sockets itself, so this is defense in depth, not a boundary.
+- Node listens on loopback only.
+- Static serving follows symlinks only when link and target have the same owner, answers
+  multi-range requests with the full file, and `NODE_OPTIONS` is kept away from the
+  supervisor, helpers and HEALTHCHECK. `/__container_health` checks the TCP peer, not
+  `X-Forwarded-For`.
   Port 8080 is the one public listener, meant to sit behind an ingress proxy that
   terminates TLS.
 - Nginx replaces `X-Forwarded-For` and `X-Forwarded-Proto` before Node sees them. Client
@@ -76,11 +82,13 @@ a fixed one.
 - **Environment variables reach your application.** The Node child inherits the container
   environment. Use the `*_FILE` variants for Loki credentials and mount the files read-only.
   Never bake credentials into the image or a filter file.
-- **Trivy does not see everything.** It reads the APK database. Fluent Bit and ngx_brotli
-  are compiled from source and are not in it, so neither the SBOM nor the vulnerability
-  scan covers them. Both are pinned in the Dockerfile (`FLUENT_BIT_VERSION` and
-  `FLUENT_BIT_SHA256`, `NGX_BROTLI_COMMIT` and `NGX_BROTLI_SHA256`) and recorded in the image
-  labels `com.lotuswebagency.fluent-bit.version` and `com.lotuswebagency.ngx-brotli.commit`.
+- **Trivy does not see everything.** It reads the APK database. Fluent Bit, ngx_brotli
+  and headers-more are compiled from source and are not in it, so neither the SBOM nor the
+  vulnerability scan covers them. All are pinned in the Dockerfile (`FLUENT_BIT_VERSION` and
+  `FLUENT_BIT_SHA256`, `NGX_BROTLI_COMMIT` and `NGX_BROTLI_SHA256`, `HEADERS_MORE_COMMIT`
+  and `HEADERS_MORE_SHA256`) and recorded in the image labels
+  `com.lotuswebagency.fluent-bit.version`, `com.lotuswebagency.ngx-brotli.commit` and
+  `com.lotuswebagency.headers-more.commit`.
   Check those against upstream advisories yourself.
 - **Not covered by automated tests:** Loki over TLS and with basic authentication against a
   real server, and `linux/arm64`. Delivery with bearer authentication is tested against a
@@ -97,7 +105,7 @@ In scope: anything shipped from this repository and anything in a published
 Out of scope:
 
 - Vulnerabilities in upstream projects that are only packaged here (Node.js, Nginx,
-  ngx_brotli, s6, Fluent Bit, Wolfi packages). Report those upstream, and tell us so we can
+  ngx_brotli, headers-more, s6, Fluent Bit, Wolfi packages). Report those upstream, and tell us so we can
   pin or patch around them.
 - Findings that need an already-compromised host or Docker daemon.
 - Your own application's code, dependencies and logging.

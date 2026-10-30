@@ -63,7 +63,7 @@ FROM lotuswebagency/nginx-nodejs:26.12@sha256:...
 
 ## Built from source
 
-Two components are compiled in the Dockerfile rather than installed from a package:
+Three components are compiled in the Dockerfile rather than installed from a package:
 
 - **Fluent Bit** is built from a pinned upstream tag (`FLUENT_BIT_VERSION`, with the tarball's
   `FLUENT_BIT_SHA256`, both in the Dockerfile), with only the plugins the collector needs.
@@ -72,8 +72,13 @@ Two components are compiled in the Dockerfile rather than installed from a packa
 - **ngx_brotli** is built from a pinned upstream commit, verified by SHA-256, against the
   Nginx source package that matches the installed Nginx. A local patch
   ([`docker/ngx_brotli-ranges.patch`](docker/ngx_brotli-ranges.patch)) enables byte ranges
-  on precompressed files and clears the content encoding on `416` responses. The build fails
-  if the patch no longer applies.
+  on precompressed files, clears the content encoding on `416` responses and fixes the
+  `.br` sibling path length that broke the module under `disable_symlinks ... from=`. The
+  build fails if the patch no longer applies.
+- **headers-more** (`openresty/headers-more-nginx-module`) is built as a dynamic module from a
+  pinned commit (`HEADERS_MORE_COMMIT`, `HEADERS_MORE_SHA256`), against the same Nginx source.
+  It sets the security and cache headers so that a `416` from the range filter does not
+  carry them twice.
 
 ## Platforms
 
