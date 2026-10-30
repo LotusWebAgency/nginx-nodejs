@@ -56,7 +56,7 @@ const checks = [
   ['public-http', httpHealthy(8080, process.env.NODE_HEALTH_PATH || '/healthz')],
   ['node-http', httpHealthy(process.env.NODE_PORT || '3000', process.env.NODE_HEALTH_PATH || '/healthz')],
 ];
-checks.push(['static-http', httpHealthy(8081, '/__container_health')]);
+checks.push(['nginx-http', httpHealthy(8080, '/__container_health')]);
 if (process.env.LOKI_ENABLED === '1') checks.push(['collector', serviceHealthy('collector', 'node', 'fluent-bit')]);
 const results = await Promise.all(checks.map(async ([name, result]) => [name, await result]));
 const failed = results.filter(([, healthy]) => !healthy).map(([name]) => name);

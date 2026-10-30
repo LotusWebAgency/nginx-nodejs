@@ -153,6 +153,6 @@ WORKDIR /app
 USER node
 EXPOSE 8080
 STOPSIGNAL SIGTERM
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 CMD ["node", "/etc/nginx-nodejs/healthcheck.mjs"]
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --start-interval=1s --retries=3 CMD ["node", "--max-semi-space-size=1", "--max-old-space-size=32", "/etc/nginx-nodejs/healthcheck.mjs"]
 ENTRYPOINT ["/etc/nginx-nodejs/entrypoint.sh"]
 CMD ["node", "/usr/share/nginx-nodejs/demo/server.mjs"]

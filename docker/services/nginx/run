@@ -1,2 +1,2 @@
 #!/bin/sh
-exec node /etc/nginx-nodejs/process.mjs nginx
+exec node --max-semi-space-size=1 --max-old-space-size=32 /etc/nginx-nodejs/process.mjs nginx

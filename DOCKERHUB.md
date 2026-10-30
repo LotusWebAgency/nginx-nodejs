@@ -94,8 +94,8 @@ same base and runs as the same user.
 | Default command | `node /usr/share/nginx-nodejs/demo/server.mjs`, a demo app. Replace it with your own. |
 | User | `node`, UID and GID 1000. This includes the Nginx master. The container refuses to start as any other UID. |
 | Working directory | `/app`, owned by `node`. |
-| Port | `8080/tcp`, Nginx. Node listens on loopback only (`127.0.0.1`, `NODE_PORT`). An internal static server uses loopback `8081`. |
-| Healthcheck | Baked: every 10 s, 5 s timeout, 30 s start period, 3 retries. |
+| Port | `8080/tcp`, Nginx. Node listens on loopback only (`127.0.0.1`, `NODE_PORT`). |
+| Healthcheck | Baked: every 10 s (every 1 s during the 30 s start period), 5 s timeout, 3 retries; healthy a few seconds after start. |
 | Stop signal | `SIGTERM`. Allow 45 seconds. |
 | Exit codes | `78` for invalid configuration, printed as `Runtime configuration error: ...` on stderr. `1` when the Node or Nginx child exits. |
 | Logs | Application and Nginx output goes through a sanitizing wrapper into `/var/lib/nginx-nodejs/logs/{node,nginx,nginx-error}/current`, not to `docker logs`. |
@@ -246,7 +246,7 @@ variables are visible to your application. The Loki credentials have `*_FILE` va
 |---|---|---|
 | `APP_DIR` | `/app` | Working directory for the Node child |
 | `STATIC_ROOT` | `/app/public` | Nginx static root. May contain dot directories such as `.output` |
-| `NODE_PORT` | `3000` | 1024 to 65535, excluding 8080 and 8081 |
+| `NODE_PORT` | `3000` | 1024 to 65535, excluding 8080 |
 | `NODE_HEALTH_PATH` | `/healthz` | Absolute path that must return `200` from Node and from the public listener |
 | `RUNTIME_MODE` | `prod` | `prod`: static files first, then Node. `dev`: proxy every request to Node |
 | `APP_ENV` | `production` | Loki `environment` label |
@@ -254,6 +254,9 @@ variables are visible to your application. The Loki credentials have `*_FILE` va
 | `LOG_SERVICE` | `nginx-nodejs` | Service name in log events, the collector filter and the Loki `service` label |
 | `PUBLIC_SCHEME` | `http` | `http` or `https`. Sent to Node as `X-Forwarded-Proto` |
 | `INGRESS_TRUSTED_IPS` | empty | Comma-separated IPs or CIDRs of trusted ingress proxies. None are trusted by default |
+| `NGINX_WORKER_PROCESSES` | from the CPU limit | Integer 1 to 64, or `auto`. Unset: `ceil(quota / period)` from cgroup v2 `cpu.max` (so `--cpus 1.5` gives 2), capped at the CPUs the container may use; with no quota, all of them |
+| `NGINX_WORKER_CONNECTIONS` | `4096` | Integer 64 to 65535. `worker_rlimit_nofile` is set to twice this plus 256, within the hard limit |
+| `NODE_MAX_OLD_SPACE_SIZE` | derived | Integer MB (at least 16) or `off`. Sets `--max-old-space-size` for the application only. Unset: with a cgroup v2 memory limit, 75% of the limit minus a 160 MB allowance for Nginx and the helper processes (floor 64 MB); with no limit, V8's default. Skipped when `NODE_OPTIONS` or the command already sets the flag |
 | `FLUENT_BIT_FILTERS_FILE` | unset | Mounted JSON array of extra collector filters |
 
 `LOG_SERVICE` and `APP_ENV` take 1 to 64 letters, digits, underscores and hyphens, and must
@@ -278,6 +281,15 @@ and `Cache-Control` values are reused. WebSocket and other `Upgrade` requests ar
 to Node. Request bodies up to 51 MiB are accepted. Nginx waits up to 5 seconds to connect to
 Node and 60 seconds for a response.
 
+Nginx keeps up to 32 idle connections per worker open to Node and closes an idle one after
+4 seconds. Node's default `server.keepAliveTimeout` is 5 seconds; if your application sets
+it below 4 seconds, raise it, or a request may hit a connection Node is closing and fail
+with `502`.
+
+Nginx runs one worker per CPU of the container's quota, and the application's V8 heap is
+capped below the container memory limit; the variables above override both.
+`UV_THREADPOOL_SIZE` stays at Node's default of 4.
+
 ## Static files and caching
 
 In `prod` mode Nginx serves an existing file or a directory's `index.html` first and falls
@@ -297,10 +309,14 @@ to `.br` and `.gz` files. In `dev` mode the same dot, `src`, `node_modules`, `ca
 `.map` rules apply, and `/dist` and `/cache` at the root and `dist/server` are blocked too.
 
 Responses of types text, CSS, JavaScript, JSON, XML and SVG of at least 512 bytes are
-compressed at request time with Brotli or gzip (level 5). If a `.br` or `.gz` sibling of a
-static file exists, it is served as is. The image does not create them; precompress in your
-build. Byte ranges and conditional requests (`304`) are answered by the internal static
-server, so they work for static files and for precompressed siblings.
+compressed at request time with Brotli (level 4) or gzip (level 5). **Precompress your
+assets for production**: a `.br` or `.gz` sibling of a static file is served as is, with no
+CPU cost per request. The image does not create them; run `brotli -k -q 11` and
+`gzip -k -9` over the static root in your build. Nginx serves static files directly on port
+8080 with an `open_file_cache` (10 s revalidation). Conditional requests (`304`) work
+everywhere. Byte ranges work for precompressed siblings and for types that are not
+compressed at request time (video, audio, PDF, archives); a range request for a compressible
+text file with no sibling gets the full compressed response (`200`).
 
 ## Logs
 
@@ -391,8 +407,8 @@ This is not lossless delivery.
 
 The healthcheck verifies, in order: the supervisor and its state flags, the Nginx and Node
 processes and their parentage, the Nginx event relay, the three ready log writers, a `200`
-from `NODE_HEALTH_PATH` on the public listener and on Node, the internal static server, and,
-when `LOKI_ENABLED=1`, the Fluent Bit process. External Loki availability is not a health
+from `NODE_HEALTH_PATH` on the public listener and on Node, a `200` from the loopback-only
+`/__container_health` route, and, when `LOKI_ENABLED=1`, the Fluent Bit process. External Loki availability is not a health
 condition.
 
 If Node or Nginx exits, the container stops with exit code 1. If the collector fails, only

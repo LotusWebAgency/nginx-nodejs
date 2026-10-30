@@ -63,7 +63,8 @@ const request = http.request({ host: '127.0.0.1', port: 8080, method, path, head
   response.on('end', () => {
     const raw = Buffer.concat(chunks);
     const encoding = response.headers['content-encoding'];
-    const decoded = encoding === 'br' ? zlib.brotliDecompressSync(raw) : encoding === 'gzip' ? zlib.gunzipSync(raw) : raw;
+    let decoded = raw;
+    try { decoded = encoding === 'br' ? zlib.brotliDecompressSync(raw) : encoding === 'gzip' ? zlib.gunzipSync(raw) : raw; } catch {}
     console.log(JSON.stringify({ status: response.statusCode, headers: response.headers, body: raw.toString('utf8'), decoded: decoded.toString('utf8') }));
   });
 });
@@ -171,6 +172,8 @@ mkdir -p "$public/assets" "$public/images" "$public/docs" "$public/node_modules/
 asset="$(for i in $(seq 1 80); do echo "export const value$i = 'nginx-nodejs compression fixture line $i';"; done)"
 printf '%s\n' "$asset" > "$public/assets/app.0123abcd.js"
 printf '/* precompressed sibling */\n' | gzip -9 > "$public/assets/app.0123abcd.js.gz"
+printf '/* precompressed br sibling */\n' | docker run --rm -i --network none --label "$LABEL" --user "$(id -u):$(id -g)" --entrypoint node "$IMAGE" -e \
+    "process.stdout.write(require('node:zlib').brotliCompressSync(require('node:fs').readFileSync(0)))" > "$public/assets/app.0123abcd.js.br"
 printf '<svg xmlns="http://www.w3.org/2000/svg">%s</svg>\n' "$(printf '<rect width="1" height="1"/>%.0s' $(seq 1 40))" > "$public/images/logo.svg"
 printf 'license text\n' > "$public/LICENSE"
 printf '<!doctype html><title>docs</title>\n' > "$public/docs/index.html"
@@ -179,10 +182,18 @@ printf 'SECRET=1\n' > "$public/.env"
 printf 'module.exports = 1;\n' > "$public/node_modules/pkg/index.js"
 cat > "$fixture/server.mjs" <<'JS'
 import { createServer } from 'node:http';
+import v8 from 'node:v8';
 
 const port = Number(process.env.PORT);
-createServer((request, response) => {
+let connections = 0;
+const server = createServer((request, response) => {
   switch (request.url) {
+    case '/heap':
+      response.writeHead(200);
+      return response.end(String(v8.getHeapStatistics().heap_size_limit));
+    case '/connections':
+      response.writeHead(200);
+      return response.end(String(connections));
     case '/ready':
       response.writeHead(200);
       return response.end('ready');
@@ -210,7 +221,12 @@ createServer((request, response) => {
       response.writeHead(404);
       return response.end('not found');
   }
-}).listen(port, process.env.HOST);
+});
+server.on('connection', () => { connections += 1; });
+server.on('upgrade', (request, socket) => {
+  socket.end('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nupgraded');
+});
+server.listen(port, process.env.HOST);
 JS
 cat > "$fixture/filters.json" <<'JSON'
 [{"name":"modify","add":"application fixture","rename":"durationMs duration_ms"}]
@@ -262,6 +278,27 @@ expect "runtime brotli" "$app" '.headers["content-encoding"] == "br" and (.decod
 expect "runtime gzip" "$app" '.headers["content-encoding"] == "gzip" and (.decoded | contains("<svg"))' GET /images/logo.svg '{"Accept-Encoding":"gzip"}'
 expect "precompressed .gz sibling preferred" "$app" '.headers["content-encoding"] == "gzip" and .decoded == "/* precompressed sibling */\n"' GET /assets/app.0123abcd.js '{"Accept-Encoding":"gzip"}'
 expect "byte range" "$app" '.status == 206 and .body == "license"' GET /LICENSE '{"Range":"bytes=0-6"}'
+expect "precompressed .br sibling preferred" "$app" '.headers["content-encoding"] == "br" and .decoded == "/* precompressed br sibling */\n"' GET /assets/app.0123abcd.js '{"Accept-Encoding":"br"}'
+expect "byte range on a precompressed .gz sibling" "$app" '.status == 206 and .headers["content-encoding"] == "gzip" and (.headers["content-range"] | startswith("bytes 0-4/"))' GET /assets/app.0123abcd.js '{"Accept-Encoding":"gzip","Range":"bytes=0-4"}'
+expect "byte range on a precompressed .br sibling" "$app" '.status == 206 and .headers["content-encoding"] == "br" and (.headers["content-range"] | startswith("bytes 0-4/"))' GET /assets/app.0123abcd.js '{"Accept-Encoding":"br","Range":"bytes=0-4"}'
+expect "unsatisfiable range on a .br sibling is a plain 416" "$app" '.status == 416 and (.headers["content-encoding"] == null)' GET /assets/app.0123abcd.js '{"Accept-Encoding":"br","Range":"bytes=99999-"}'
+expect "Range request still falls back to Node" "$app" '.status == 200 and (.body | fromjson | .port == 3007)' GET /echo '{"Range":"bytes=0-9"}'
+expect "container health route answers on loopback" "$app" '.status == 200' GET /__container_health
+check "WebSocket upgrade passes through" docker exec "$app" node -e "
+const http = require('node:http');
+http.request({ host: '127.0.0.1', port: 8080, path: '/ws', headers: { Connection: 'Upgrade', Upgrade: 'websocket' }, timeout: 5000 })
+  .on('upgrade', (response, socket, head) => {
+    let body = head.toString();
+    socket.on('data', chunk => { body += chunk; });
+    socket.on('end', () => process.exit(response.statusCode === 101 && body.includes('upgraded') ? 0 : 1));
+  })
+  .on('response', () => process.exit(1))
+  .on('error', () => process.exit(1))
+  .end();"
+before="$(probe "$app" GET /connections | jq -r .body)"
+for i in $(seq 1 30); do probe "$app" GET /ready >/dev/null; done
+after="$(probe "$app" GET /connections | jq -r .body)"
+check "upstream connections are reused (30 requests opened $((after - before)))" test "$((after - before))" -le 6
 etag="$(probe "$app" GET /LICENSE | jq -r '.headers.etag')" || etag=""
 expect "conditional request returns 304" "$app" '.status == 304' GET /LICENSE "{\"If-None-Match\":$(jq -Rn --arg e "$etag" '$e')}"
 for path in /.env /node_modules/pkg/index.js /assets/app.0123abcd.js.map /assets/app.0123abcd.js.gz; do
@@ -285,8 +322,34 @@ check "no secret canary in persisted logs or Loki" sh -c '! grep -q CANARY' <<<"
 probe "$app" GET /exit >/dev/null || true
 check "Node exit stops the container with status 1" test "$(exit_code "$app")" = 1
 
+# ------------------------------------------------------- resource limits
+# Container limits: 2 CPUs give 2 workers, 512 MB give a heap near 75% of what is left after the allowance.
+limited="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 --cpus 2 --memory 512m --read-only \
+    --tmpfs /run/nginx-nodejs:uid=1000,gid=1000,mode=0700 --tmpfs /tmp:uid=1000,gid=1000,mode=1777 \
+    --tmpfs /var/lib/nginx-nodejs:uid=1000,gid=1000,mode=0700 -v "$fixture:/fixture:ro" \
+    -e APP_DIR=/fixture -e STATIC_ROOT=/fixture/.output/public -e NODE_PORT=3007 -e NODE_HEALTH_PATH=/ready \
+    "$IMAGE" node /fixture/server.mjs)"
+check "limited: healthcheck passes" wait_healthy "$limited"
+workers() { docker exec "$1" ps -o args | grep -c 'nginx: worker'; }
+check "limited: --cpus 2 gives 2 Nginx workers" test "$(workers "$limited")" = 2
+expect "limited: --memory 512m caps the app heap" "$limited" '(.body | tonumber) > 250000000 and (.body | tonumber) < 330000000' GET /heap
+docker rm -f "$limited" >/dev/null
+override="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 --cpus 2 --memory 512m --read-only \
+    --tmpfs /run/nginx-nodejs:uid=1000,gid=1000,mode=0700 --tmpfs /tmp:uid=1000,gid=1000,mode=1777 \
+    --tmpfs /var/lib/nginx-nodejs:uid=1000,gid=1000,mode=0700 -v "$fixture:/fixture:ro" \
+    -e APP_DIR=/fixture -e STATIC_ROOT=/fixture/.output/public -e NODE_PORT=3007 -e NODE_HEALTH_PATH=/ready \
+    -e NGINX_WORKER_PROCESSES=3 -e NODE_MAX_OLD_SPACE_SIZE=96 \
+    "$IMAGE" node /fixture/server.mjs)"
+check "override: healthcheck passes" wait_healthy "$override"
+check "override: NGINX_WORKER_PROCESSES=3 gives 3 workers" test "$(workers "$override")" = 3
+expect "override: NODE_MAX_OLD_SPACE_SIZE=96 caps the app heap" "$override" '(.body | tonumber) > 90000000 and (.body | tonumber) < 160000000' GET /heap
+docker rm -f "$override" >/dev/null
+
 # ------------------------------------------------------- config validation
-for args in "-e NODE_PORT=8080 $IMAGE" "-e RUNTIME_MODE=staging $IMAGE" "$IMAGE sh -c true"; do
+for args in "-e NODE_PORT=8080 $IMAGE" "-e RUNTIME_MODE=staging $IMAGE" "$IMAGE sh -c true" \
+    "-e NGINX_WORKER_PROCESSES=0 $IMAGE" "-e NGINX_WORKER_PROCESSES=65 $IMAGE" "-e NGINX_WORKER_PROCESSES=many $IMAGE" \
+    "-e NGINX_WORKER_CONNECTIONS=10 $IMAGE" "-e NGINX_WORKER_CONNECTIONS=lots $IMAGE" \
+    "-e NODE_MAX_OLD_SPACE_SIZE=huge $IMAGE" "-e NODE_MAX_OLD_SPACE_SIZE=4 $IMAGE"; do
     code=0
     # shellcheck disable=SC2086
     timeout 60 docker run --rm --init --network none --label "$LABEL" $args >/dev/null 2>&1 || code=$?
