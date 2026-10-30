@@ -10,6 +10,10 @@ ARG FLUENT_BIT_VERSION=5.0.7
 ARG FLUENT_BIT_SHA256=a760cdce272d6025100346d27315cc03a9b3466e5a8a24aaae6f2ad6a9cda29f
 ARG NGX_BROTLI_COMMIT=53e0fb55f250f48fe80c0ddbf6c0f7103cdbaae1
 ARG NGX_BROTLI_SHA256=27a4352dae4ba4922f9f013f3f0d02359aceeef2701872efa42849c3ba05457a
+# headers-more v0.41: more_set_headers replaces a header instead of appending, which add_header
+# cannot do when Nginx re-runs the header filters for a 416.
+ARG HEADERS_MORE_COMMIT=21066f7eed72e4de4f6ec47b93e8d5f36c38b84a
+ARG HEADERS_MORE_SHA256=52f3f4dc1b34efa887155e92398052bf477702b2753585fe3482e2dd0136ea62
 # Busybox's raw-socket and interface applets give an attacker with code execution a ready-made
 # network toolbox and nothing here uses them. Wolfi's busybox already omits nc, wget, telnet,
 # ftp*, tftp and httpd; the rest are pruned again after every `apk add`, because busybox's apk
@@ -95,6 +99,8 @@ WORKDIR /build
 COPY docker/ngx_brotli-ranges.patch ./
 ARG NGX_BROTLI_COMMIT
 ARG NGX_BROTLI_SHA256
+ARG HEADERS_MORE_COMMIT
+ARG HEADERS_MORE_SHA256
 # The package source follows the installed Nginx ABI; fail if the repository moves mid-build.
 RUN curl -fsSL "https://codeload.github.com/google/ngx_brotli/tar.gz/${NGX_BROTLI_COMMIT}" -o brotli.tar.gz \
     && echo "${NGX_BROTLI_SHA256}  brotli.tar.gz" | sha256sum -c - \
@@ -104,6 +110,10 @@ RUN curl -fsSL "https://codeload.github.com/google/ngx_brotli/tar.gz/${NGX_BROTL
     && mkdir -p ngx_brotli/deps/brotli/c \
     && ln -s /usr/include ngx_brotli/deps/brotli/c/include \
     && ln -s /usr/lib ngx_brotli/deps/brotli/out \
+    && curl -fsSL "https://codeload.github.com/openresty/headers-more-nginx-module/tar.gz/${HEADERS_MORE_COMMIT}" -o headers-more.tar.gz \
+    && echo "${HEADERS_MORE_SHA256}  headers-more.tar.gz" | sha256sum -c - \
+    && mkdir headers-more \
+    && tar -xzf headers-more.tar.gz -C headers-more --strip-components=1 \
     && cp -a /usr/src/nginx nginx \
     && cd nginx \
     && nginx_args="$(nginx -V 2>&1 | sed -n 's/^configure arguments: //p')" \
@@ -114,9 +124,13 @@ RUN curl -fsSL "https://codeload.github.com/google/ngx_brotli/tar.gz/${NGX_BROTL
     && ld_opt="$ld_opt -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack" \
     && ./auto/configure --with-compat --with-threads --with-file-aio \
         --with-cc-opt="$cc_opt" --with-ld-opt="$ld_opt" --add-dynamic-module=/build/ngx_brotli \
+        --add-dynamic-module=/build/headers-more \
     && make -j2 modules
 
 FROM node-base AS builder
+ARG WOLFI_IMAGE
+LABEL org.opencontainers.image.base.name="${WOLFI_IMAGE%%@*}" \
+      org.opencontainers.image.base.digest="${WOLFI_IMAGE##*@}"
 RUN apk add --no-cache npm
 WORKDIR /app
 USER node
@@ -125,6 +139,7 @@ FROM runtime-packages AS runtime
 ARG WOLFI_IMAGE
 ARG FLUENT_BIT_VERSION
 ARG NGX_BROTLI_COMMIT
+ARG HEADERS_MORE_COMMIT
 LABEL org.opencontainers.image.title="nginx-nodejs" \
       org.opencontainers.image.description="Rootless Node.js and Nginx runtime with Brotli, s6 supervision, and optional Fluent Bit/Loki logging" \
       org.opencontainers.image.authors="Vasilii Dementev https://vasiliidementev.com" \
@@ -136,10 +151,12 @@ LABEL org.opencontainers.image.title="nginx-nodejs" \
       org.opencontainers.image.base.name="${WOLFI_IMAGE%%@*}" \
       org.opencontainers.image.base.digest="${WOLFI_IMAGE##*@}" \
       com.lotuswebagency.fluent-bit.version="${FLUENT_BIT_VERSION}" \
-      com.lotuswebagency.ngx-brotli.commit="${NGX_BROTLI_COMMIT}"
-COPY --from=nginx-brotli /build/nginx/objs/ngx_http_brotli_filter_module.so /build/nginx/objs/ngx_http_brotli_static_module.so /usr/lib/nginx/modules/
+      com.lotuswebagency.ngx-brotli.commit="${NGX_BROTLI_COMMIT}" \
+      com.lotuswebagency.headers-more.commit="${HEADERS_MORE_COMMIT}"
+COPY --from=nginx-brotli /build/nginx/objs/ngx_http_brotli_filter_module.so /build/nginx/objs/ngx_http_brotli_static_module.so /build/nginx/objs/ngx_http_headers_more_filter_module.so /usr/lib/nginx/modules/
 COPY --from=nginx-brotli /build/ngx_brotli/LICENSE /usr/share/licenses/ngx_brotli/LICENSE
-RUN printf 'user node;\nerror_log stderr;\nload_module /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so;\nload_module /usr/lib/nginx/modules/ngx_http_brotli_static_module.so;\npid /tmp/nginx.pid;\nevents {}\nhttp {}\n' > /tmp/modules.conf \
+COPY --from=nginx-brotli /build/headers-more/LICENSE /usr/share/licenses/headers-more-nginx-module/LICENSE
+RUN printf 'user node;\nerror_log stderr;\nload_module /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so;\nload_module /usr/lib/nginx/modules/ngx_http_brotli_static_module.so;\nload_module /usr/lib/nginx/modules/ngx_http_headers_more_filter_module.so;\npid /tmp/nginx.pid;\nevents {}\nhttp {}\n' > /tmp/modules.conf \
     && nginx -t -e stderr -c /tmp/modules.conf \
     && rm /tmp/modules.conf
 COPY docker/ /etc/nginx-nodejs/
@@ -153,6 +170,6 @@ WORKDIR /app
 USER node
 EXPOSE 8080
 STOPSIGNAL SIGTERM
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --start-interval=1s --retries=3 CMD ["node", "--max-semi-space-size=1", "--max-old-space-size=32", "/etc/nginx-nodejs/healthcheck.mjs"]
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --start-interval=1s --retries=3 CMD ["env", "-u", "NODE_OPTIONS", "node", "--max-semi-space-size=1", "--max-old-space-size=32", "/etc/nginx-nodejs/healthcheck.mjs"]
 ENTRYPOINT ["/etc/nginx-nodejs/entrypoint.sh"]
 CMD ["node", "/usr/share/nginx-nodejs/demo/server.mjs"]
