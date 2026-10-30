@@ -145,6 +145,10 @@ jobs:
         org.opencontainers.image.vendor=Lotus Web Agency
         org.opencontainers.image.authors=Vasilii Dementev https://vasiliidementev.com
         org.opencontainers.image.licenses=MIT
+    # Environment secrets resolve in the called job only when the caller inherits secrets
+    # (actions/runner#4453). The repo holds no other secrets, and pull-request runs never
+    # enter `release`, so they still see none.
+    secrets: inherit
 
   sync-description:
     if: github.event_name != 'pull_request'
@@ -155,3 +159,4 @@ jobs:
       image: nginx-nodejs
       environment: release
       short-description: "Rootless Node.js + Nginx runtime: Brotli/gzip statics, caching, s6 supervision, logs to Loki."
+    secrets: inherit
