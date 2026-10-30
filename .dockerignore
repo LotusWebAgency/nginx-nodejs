@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+**/.env*
+**/.npmrc
+auth.json
+**/node_modules
+**/dist
+**/.cache
+**/test-results
+*.log

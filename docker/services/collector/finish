@@ -1,0 +1,4 @@
+#!/bin/sh
+if [ -n "${4:-}" ]; then kill -KILL -- "-$4" 2>/dev/null || true; fi
+if [ -f /run/nginx-nodejs/stopping ]; then exit 0; fi
+sleep 5

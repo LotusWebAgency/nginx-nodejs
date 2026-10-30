@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node /etc/nginx-nodejs/process.mjs collector

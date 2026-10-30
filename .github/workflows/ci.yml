@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "40 4 * * 1" # weekly rebuild: fresh Wolfi base and Node/Nginx packages
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: runtime
+            tag: latest
+            suffix: ""
+            title: nginx-nodejs
+            description: Rootless Node.js runtime behind Nginx — static files, Brotli/gzip, caching, s6 supervision and sanitized logs with optional Loki delivery.
+          - target: builder
+            tag: builder
+            suffix: -builder
+            title: nginx-nodejs builder
+            description: Node.js and npm build stage matching the nginx-nodejs runtime, for multi-stage application builds.
+    uses: vdementev/docker-workflows/.github/workflows/build-image.yml@v1
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      namespace: lotuswebagency
+      image: nginx-nodejs
+      target: ${{ matrix.target }}
+      cache-scope: ${{ matrix.target }}
+      push: ${{ github.event_name != 'pull_request' }}
+      # Fluent Bit and the Brotli modules compile from source; arm64 waits until
+      # it is verified natively rather than under QEMU.
+      platforms: linux/amd64
+      timeout-minutes: 90
+      tags: |
+        type=raw,value=${{ matrix.tag }}
+      # Runtime: routing, caching, compression, log privacy, Loki delivery,
+      # supervision and config validation. Builder: node + npm, UID 1000.
+      # $IMAGE is set by the reusable workflow.
+      test-command: TARGET=${{ matrix.target }} ./tests.sh
+      # Node is an unpinned Wolfi package, so the version tags are read back
+      # out of the image that just passed the tests: 26.12.1 and 26.12.
+      version-command: docker run --rm --network none --entrypoint node "$IMAGE" -p process.versions.node
+      version-tag-suffix: ${{ matrix.suffix }}
+      labels: |
+        org.opencontainers.image.title=${{ matrix.title }}
+        org.opencontainers.image.description=${{ matrix.description }}
+        org.opencontainers.image.url=https://hub.docker.com/r/lotuswebagency/nginx-nodejs
+        org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}#readme
+        org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+        org.opencontainers.image.revision=${{ github.sha }}
+        org.opencontainers.image.vendor=Lotus Web Agency
+        org.opencontainers.image.authors=Vasilii Dementev https://vasiliidementev.com
+        org.opencontainers.image.licenses=MIT
+    # Called across organizations, so `secrets: inherit` does not apply.
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  sync-description:
+    if: github.event_name != 'pull_request'
+    needs: build
+    uses: vdementev/docker-workflows/.github/workflows/sync-description.yml@v1
+    with:
+      namespace: lotuswebagency
+      image: nginx-nodejs
+      short-description: "Rootless Node.js + Nginx runtime: Brotli/gzip statics, caching, s6 supervision, logs to Loki."
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

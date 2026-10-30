@@ -1,0 +1,2 @@
+#!/bin/sh
+exec s6-log -d 3 -b n3 s1000000 S3000000 1 /var/lib/nginx-nodejs/logs/nginx-error

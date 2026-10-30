@@ -1,0 +1,3 @@
+#!/bin/sh
+touch /run/nginx-nodejs/stopping
+exec s6-svscanctl -t /run/nginx-nodejs/service

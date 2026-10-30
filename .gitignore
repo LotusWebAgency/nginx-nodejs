@@ -1,0 +1,8 @@
+.env
+.env.*
+node_modules/
+test-results/
+*.log
+CLAUDE.md
+AGENTS.md
+.claude/

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices"
+  ],
+  "packageRules": [
+    {
+      "description": "Wolfi base and APK packages float by design; the weekly rebuild refreshes them",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchDepNames": [
+        "cgr.dev/chainguard/wolfi-base"
+      ],
+      "pinDigests": false,
+      "enabled": false
+    },
+    {
+      "description": "Keep the floating @v1 ref to our reusable workflows",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchDepNames": [
+        "vdementev/docker-workflows"
+      ],
+      "enabled": false
+    }
+  ]
+}
