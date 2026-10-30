@@ -36,6 +36,10 @@ jobs:
     with:
       namespace: lotuswebagency
       image: nginx-nodejs
+      # Docker Hub credentials are secrets of the `release` environment, which
+      # only `main` may enter; the job enters it only when it publishes, so
+      # pull requests never see them.
+      environment: release
       target: ${{ matrix.target }}
       cache-scope: ${{ matrix.target }}
       push: ${{ github.event_name != 'pull_request' }}
@@ -63,10 +67,6 @@ jobs:
         org.opencontainers.image.vendor=Lotus Web Agency
         org.opencontainers.image.authors=Vasilii Dementev https://vasiliidementev.com
         org.opencontainers.image.licenses=MIT
-    # Called across organizations, so `secrets: inherit` does not apply.
-    secrets:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   sync-description:
     if: github.event_name != 'pull_request'
@@ -75,7 +75,5 @@ jobs:
     with:
       namespace: lotuswebagency
       image: nginx-nodejs
+      environment: release
       short-description: "Rootless Node.js + Nginx runtime: Brotli/gzip statics, caching, s6 supervision, logs to Loki."
-    secrets:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
