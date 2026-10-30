@@ -10,7 +10,9 @@ async function processStatus(pid, command) {
   const end = stat.lastIndexOf(')');
   const fields = stat.slice(end + 2).split(' ');
   const actualCommand = stat.slice(stat.indexOf('(') + 1, end);
-  if (!(actualCommand === command || command === 'node' && actualCommand === 'node-MainThread') || !/^[RSDI]$/.test(fields[0])) throw new Error();
+  // The main thread's comm differs by Node release: node (22), MainThread (24), node-MainThread (26).
+  const nodeNames = ['node', 'MainThread', 'node-MainThread'];
+  if (!(actualCommand === command || command === 'node' && nodeNames.includes(actualCommand)) || !/^[RSDI]$/.test(fields[0])) throw new Error();
   return { parent: fields[1] };
 }
 async function serviceHealthy(name, command, childCommand, requireReady = false) {
