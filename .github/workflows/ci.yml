@@ -151,8 +151,10 @@ jobs:
     # pull-request runs never enter `release`, so they still see none.
     secrets: inherit
 
+  # The overview is documentation, so one failed leg (say, a Node major waiting on a Wolfi
+  # fix) must not keep it stale on Docker Hub.
   sync-description:
-    if: github.event_name != 'pull_request'
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     needs: build
     uses: LotusWebAgency/docker-workflows/.github/workflows/sync-description.yml@v1
     with:
