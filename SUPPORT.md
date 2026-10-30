@@ -84,7 +84,7 @@ Not covered by automated tests, and so not claimed as verified:
 
 These are public interface: the environment variables in the
 [README](README.md#configuration) and [Send to Loki](README.md#send-to-loki), the paths
-`/app`, `/run/nginx-nodejs` and `/var/lib/nginx-nodejs`, ports 8080 and 8081, UID 1000, the
+`/app`, `/run/nginx-nodejs` and `/var/lib/nginx-nodejs`, port 8080, UID 1000, the
 log event names and fields, and the exit codes. Changes to them are called out in the pull
 request and covered by `tests.sh`.
 
