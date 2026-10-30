@@ -85,8 +85,27 @@ function safeLine(line, oversized = false) {
     });
   }
 }
+// Under a cgroup v2 memory limit, cap the V8 heap below it so the app is collected before the kernel kills the container.
+// The allowance covers Nginx, the helper Node processes and the collector, which share the limit.
+const reservedMb = 160;
+function appHeapOptions() {
+  const setting = process.env.NODE_MAX_OLD_SPACE_SIZE || '';
+  if (setting === 'off') return '';
+  if (setting) return `--max-old-space-size=${Number(setting)}`;
+  if ((process.env.NODE_OPTIONS || '').includes('--max-old-space-size') || nodeCommand.some(value => value.startsWith('--max-old-space-size'))) return '';
+  try {
+    const limit = readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+    if (!/^\d+$/.test(limit)) return '';
+    return `--max-old-space-size=${Math.max(64, Math.floor((Number(limit) / 1048576 - reservedMb) * 0.75))}`;
+  } catch { return ''; }
+}
+const environment = { ...process.env, ...collectorEnvironment, HOST: '127.0.0.1', PORT: process.env.NODE_PORT || '3000', NO_COLOR: '1' };
+if (service === 'node') {
+  const heap = appHeapOptions();
+  if (heap) environment.NODE_OPTIONS = [process.env.NODE_OPTIONS, heap].filter(Boolean).join(' ');
+}
 const [command, args] = commands[service];
-const child = spawn(command, args, { cwd: service === 'node' ? app : '/', env: { ...process.env, ...collectorEnvironment, HOST: '127.0.0.1', PORT: process.env.NODE_PORT || '3000', NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+const child = spawn(command, args, { cwd: service === 'node' ? app : '/', env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
 for (const stream of [child.stdout, child.stderr]) {
   let pending = '';
   let oversized = false;

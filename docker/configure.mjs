@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync, cpSync, existsSync, statSync, accessSync, constants, chmodSync, readdirSync, unlinkSync, symlinkSync, rmSync } from 'node:fs';
 import { isIP } from 'node:net';
+import { availableParallelism } from 'node:os';
 import { collectorPaths } from './collector-paths.mjs';
 
 function fail(message) {
@@ -27,7 +28,13 @@ if (!validPath(app)) fail('invalid APP_DIR');
 const staticRoot = process.env.STATIC_ROOT || '/app/public';
 if (!validPath(staticRoot)) fail('invalid STATIC_ROOT');
 const nodePort = process.env.NODE_PORT || '3000';
-if (!/^\d{1,5}$/.test(nodePort) || Number(nodePort) < 1024 || Number(nodePort) > 65535 || [8080, 8081].includes(Number(nodePort))) fail('invalid NODE_PORT');
+if (!/^\d{1,5}$/.test(nodePort) || Number(nodePort) < 1024 || Number(nodePort) > 65535 || Number(nodePort) === 8080) fail('invalid NODE_PORT');
+const workersSetting = process.env.NGINX_WORKER_PROCESSES || '';
+if (workersSetting && workersSetting !== 'auto' && !(/^[1-9]\d?$/.test(workersSetting) && Number(workersSetting) <= 64)) fail('NGINX_WORKER_PROCESSES must be an integer from 1 to 64 or auto');
+const connectionsSetting = process.env.NGINX_WORKER_CONNECTIONS || '4096';
+if (!/^\d{2,5}$/.test(connectionsSetting) || Number(connectionsSetting) < 64 || Number(connectionsSetting) > 65535) fail('NGINX_WORKER_CONNECTIONS must be an integer from 64 to 65535');
+const heapSetting = process.env.NODE_MAX_OLD_SPACE_SIZE || '';
+if (heapSetting && heapSetting !== 'off' && !(/^\d{1,6}$/.test(heapSetting) && Number(heapSetting) >= 16)) fail('NODE_MAX_OLD_SPACE_SIZE must be an integer of at least 16 (MB) or off');
 const healthPath = process.env.NODE_HEALTH_PATH || '/healthz';
 if (!/^\/[a-zA-Z0-9_./-]*$/.test(healthPath) || healthPath.split('/').includes('..')) fail('invalid NODE_HEALTH_PATH');
 const logService = process.env.LOG_SERVICE || 'nginx-nodejs';
@@ -96,11 +103,28 @@ function linkScripts(source, target) {
 linkScripts('/etc/nginx-nodejs/services', '/run/nginx-nodejs/service');
 writeFileSync('/run/nginx-nodejs/node-command.json', JSON.stringify(nodeCommand), { mode: 0o600 });
 chmodSync('/run/nginx-nodejs/node-command.json', 0o600);
-writeFileSync('/run/nginx-nodejs/nginx.conf', readFileSync('/etc/nginx-nodejs/nginx.conf', 'utf8').replaceAll('__STATIC_ROOT__', staticRoot).replaceAll('__LOG_SERVICE__', logService));
+// Workers follow the container CPU quota (cgroup v2), never more than the CPUs this process may run on.
+function workerProcesses() {
+  if (workersSetting) return workersSetting;
+  const visible = Math.min(availableParallelism(), 64);
+  try {
+    const [quota, period] = readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim().split(/\s+/);
+    if (quota !== 'max' && Number(quota) > 0 && Number(period) > 0) return String(Math.min(Math.max(Math.ceil(Number(quota) / Number(period)), 1), visible));
+  } catch {}
+  return String(visible);
+}
+// Each proxied connection holds two descriptors; raising the soft limit is allowed up to the hard limit.
+function fileLimit(connections) {
+  const wanted = connections * 2 + 256;
+  try {
+    const hard = readFileSync('/proc/self/limits', 'utf8').match(/^Max open files\s+\S+\s+(\S+)/m)?.[1];
+    return /^\d+$/.test(hard) ? Math.min(wanted, Number(hard)) : wanted;
+  } catch { return wanted; }
+}
+writeFileSync('/run/nginx-nodejs/nginx.conf', readFileSync('/etc/nginx-nodejs/nginx.conf', 'utf8').replaceAll('__STATIC_ROOT__', staticRoot).replaceAll('__LOG_SERVICE__', logService).replaceAll('__NODE_PORT__', String(Number(nodePort))).replaceAll('__WORKER_PROCESSES__', workerProcesses()).replaceAll('__WORKER_CONNECTIONS__', String(Number(connectionsSetting))).replaceAll('__WORKER_RLIMIT_NOFILE__', String(fileLimit(Number(connectionsSetting)))));
 writeFileSync('/run/nginx-nodejs/ingress.conf', `${ingress.map(ip => `set_real_ip_from ${ip};`).join('\n')}\nreal_ip_header X-Forwarded-For;\nreal_ip_recursive off;\n`);
-writeFileSync('/run/nginx-nodejs/proxy.conf', readFileSync('/etc/nginx-nodejs/proxy.conf', 'utf8').replace('__PUBLIC_SCHEME__', publicScheme).replace('__NODE_PORT__', String(Number(nodePort))));
+writeFileSync('/run/nginx-nodejs/proxy.conf', readFileSync('/etc/nginx-nodejs/proxy.conf', 'utf8').replace('__PUBLIC_SCHEME__', publicScheme));
 writeFileSync('/run/nginx-nodejs/routes.conf', readFileSync(`/etc/nginx-nodejs/routes.${mode}.conf`));
-writeFileSync('/run/nginx-nodejs/static-server.conf', readFileSync('/etc/nginx-nodejs/static-server.conf', 'utf8').replaceAll('__STATIC_ROOT__', staticRoot));
 if (enabled === '0') writeFileSync('/run/nginx-nodejs/service/collector/down', '');
 const collectorEnvironment = {};
 function credential(name, value) {
