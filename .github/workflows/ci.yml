@@ -14,21 +14,57 @@ concurrency:
 
 jobs:
   build:
-    name: build ${{ matrix.target }}
+    name: build ${{ matrix.target }} ${{ matrix.node }}
     strategy:
       fail-fast: false
       matrix:
+        # Three Node majors x two targets. The newest major also carries the
+        # unversioned `latest` / `builder` tags.
         include:
-          - target: runtime
-            tag: latest
+          - node: "22"
+            target: runtime
             suffix: ""
             title: nginx-nodejs
             description: Rootless Node.js runtime behind Nginx — static files, Brotli/gzip, caching, s6 supervision and sanitized logs with optional Loki delivery.
-          - target: builder
-            tag: builder
-            suffix: -builder
+            tags: |
+              type=raw,value=22
+          - node: "24"
+            target: runtime
+            suffix: ""
+            title: nginx-nodejs
+            description: Rootless Node.js runtime behind Nginx — static files, Brotli/gzip, caching, s6 supervision and sanitized logs with optional Loki delivery.
+            tags: |
+              type=raw,value=24
+          - node: "26"
+            target: runtime
+            suffix: ""
+            title: nginx-nodejs
+            description: Rootless Node.js runtime behind Nginx — static files, Brotli/gzip, caching, s6 supervision and sanitized logs with optional Loki delivery.
+            tags: |
+              type=raw,value=26
+              type=raw,value=latest
+          - node: "22"
+            target: builder
+            suffix: "-builder"
             title: nginx-nodejs builder
             description: Node.js and npm build stage matching the nginx-nodejs runtime, for multi-stage application builds.
+            tags: |
+              type=raw,value=22-builder
+          - node: "24"
+            target: builder
+            suffix: "-builder"
+            title: nginx-nodejs builder
+            description: Node.js and npm build stage matching the nginx-nodejs runtime, for multi-stage application builds.
+            tags: |
+              type=raw,value=24-builder
+          - node: "26"
+            target: builder
+            suffix: "-builder"
+            title: nginx-nodejs builder
+            description: Node.js and npm build stage matching the nginx-nodejs runtime, for multi-stage application builds.
+            tags: |
+              type=raw,value=26-builder
+              type=raw,value=builder
     uses: vdementev/docker-workflows/.github/workflows/build-image.yml@v1
     permissions:
       contents: read
@@ -41,20 +77,21 @@ jobs:
       # pull requests never see them.
       environment: release
       target: ${{ matrix.target }}
-      cache-scope: ${{ matrix.target }}
+      build-args: NODE_MAJOR=${{ matrix.node }}
+      cache-scope: ${{ matrix.target }}-${{ matrix.node }}
       push: ${{ github.event_name != 'pull_request' }}
       # Fluent Bit and the Brotli modules compile from source; arm64 waits until
       # it is verified natively rather than under QEMU.
       platforms: linux/amd64
       timeout-minutes: 90
-      tags: |
-        type=raw,value=${{ matrix.tag }}
+      tags: ${{ matrix.tags }}
       # Runtime: routing, caching, compression, log privacy, Loki delivery,
       # supervision and config validation. Builder: node + npm, UID 1000.
       # $IMAGE is set by the reusable workflow.
-      test-command: TARGET=${{ matrix.target }} ./tests.sh
-      # Node is an unpinned Wolfi package, so the version tags are read back
-      # out of the image that just passed the tests: 26.12.1 and 26.12.
+      test-command: NODE_MAJOR=${{ matrix.node }} TARGET=${{ matrix.target }} ./tests.sh
+      # Node is an unpinned Wolfi package (one per major), so the version tags are read back
+      # out of the image that just passed the tests: 26.12.1 and 26.12 (plus
+      # the -builder suffix for the builder).
       version-command: docker run --rm --network none --entrypoint node "$IMAGE" -p process.versions.node
       version-tag-suffix: ${{ matrix.suffix }}
       labels: |

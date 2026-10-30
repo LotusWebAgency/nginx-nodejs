@@ -26,21 +26,42 @@ A full consumer Dockerfile is in [Use your application](#use-your-application).
 
 ## Tags
 
+Pick a Node.js major with the tag. `latest` and `builder` are the newest major (26).
+
 | Tag | Contents |
 |---|---|
-| `latest` | The runtime image. Moves on every merge to `main` and on the weekly rebuild. |
-| `26.12.1` | The runtime image with that exact Node.js version (an example; the tag follows the Node in the image). |
-| `26.12` | The newest patch of that Node.js minor. |
-| `builder` | The build-stage image: Node.js and npm, no Nginx. |
-| `26.12.1-builder`, `26.12-builder` | The same version tags for the builder. |
+| `latest`, `26` | The runtime image on Node.js 26. Moves on every merge to `main` and on the weekly rebuild. |
+| `24`, `22` | The runtime image on that Node.js major. |
+| `26.12.1`, `26.12` | The runtime image with that exact Node.js version, or the newest patch of that minor (examples; the tags follow the Node in the image). The same forms exist for 24 and 22. |
+| `builder`, `26-builder` | The build-stage image on Node.js 26: Node.js and npm, no Nginx. |
+| `24-builder`, `22-builder` | The builder on that Node.js major. |
+| `26.12.1-builder`, `26.12-builder` | The version tags for the builder (examples). |
+
+Use the same major for both stages, so you build and run on the same Node.js:
+
+```dockerfile
+FROM lotuswebagency/nginx-nodejs:24-builder AS build
+# ... install and build ...
+
+FROM lotuswebagency/nginx-nodejs:24
+```
+
+| Node.js | Status in October 2026 | Upstream end of life |
+|---|---|---|
+| 22 | Maintenance LTS | 2027-04-30 |
+| 24 | Maintenance LTS (since 2026-10-20) | 2028-04-30 |
+| 26 | Active LTS (since 2026-10-28) | 2029-04-30 |
+
+Dates are from the [Node.js release schedule](https://github.com/nodejs/Release/blob/main/schedule.json).
 
 Version tags are read out of the built image (`node -p process.versions.node`) after the
 tests and the Trivy gate, never from the Dockerfile, so a tag cannot claim a Node version
 the image does not run.
 
-Node.js, Nginx and the Wolfi base are not pinned. They come from unversioned APK packages,
-so `latest` follows Wolfi's current `nodejs` package, including a new major when Wolfi
-moves. If you need a stable Node major, pin the `<major.minor>` tag or, better, a digest:
+Each major tag follows the matching Wolfi `nodejs-<major>` package, so minor and patch
+releases arrive with rebuilds and the major never changes under a major tag. Nginx and the
+Wolfi base are not pinned either. `latest` moves to a newer major when one is added here, so
+production images should name a major (`24`) or, better, a `<major.minor>` tag or digest:
 
 ```dockerfile
 FROM lotuswebagency/nginx-nodejs:26.12@sha256:...
@@ -52,8 +73,8 @@ keyless Cosign signature. See [Security and provenance](#security-and-provenance
 
 ## What is inside
 
-- **Wolfi** base (`cgr.dev/chainguard/wolfi-base`), Node.js from the Wolfi `nodejs`
-  package.
+- **Wolfi** base (`cgr.dev/chainguard/wolfi-base`), Node.js 22, 24 or 26 from the Wolfi
+  `nodejs-<major>` package.
 - **Nginx** (Wolfi `nginx-mainline`) with the **ngx_brotli** filter and static modules.
   ngx_brotli is built from a pinned upstream commit, checked by SHA-256, against the
   installed Nginx source, with a local patch for byte ranges and `416` responses
@@ -368,11 +389,13 @@ compiled from source. Reporting, scope and boundaries: [SECURITY.md](SECURITY.md
 
 `.github/workflows/ci.yml` is a thin caller of the shared reusable workflow in
 [`vdementev/docker-workflows`](https://github.com/vdementev/docker-workflows), pinned to
-`@v1`, with one matrix entry for the `runtime` target and one for `builder`.
+`@v1`, with a matrix of three Node.js majors (22, 24, 26) by two targets (`runtime`, `builder`):
+six builds, each tested with `NODE_MAJOR` set so the image must run that major.
 
 1. Pull requests build `linux/amd64`, run `tests.sh` against the built image, then the
    Trivy gate. Nothing is published.
-2. Merging to `main` publishes `latest` and `builder` plus the version tags, with the SBOM,
+2. Merging to `main` publishes the major tags (`22`, `24`, `26`, `22-builder`, ...), `latest`
+   and `builder` (Node.js 26) and the version tags, with the SBOM,
    provenance and Cosign signature, and syncs [DOCKERHUB.md](DOCKERHUB.md) to the Docker Hub
    description.
 3. A weekly rebuild (Mondays) republishes the current tags to pick up new Wolfi packages.
@@ -403,7 +426,8 @@ Runtime checks:
 - A Node child that exits stops the container with exit code 1.
 - An invalid `NODE_PORT` or a command that does not start with `node` exits with 78.
 
-Builder checks: Node and npm present, UID 1000, no Nginx.
+Builder checks: Node and npm present, UID 1000, no Nginx. With `NODE_MAJOR` set, both
+targets also assert that the image runs that Node.js major.
 
 Not covered by the automated tests: Loki over TLS or with basic authentication against a
 real server, and `linux/arm64`. Startup does validate the generated collector
@@ -420,6 +444,14 @@ docker buildx build --load --network host --target builder -t nginx-nodejs:build
 
 IMAGE=nginx-nodejs:local ./tests.sh
 IMAGE=nginx-nodejs:builder TARGET=builder ./tests.sh
+```
+
+The default is Node.js 26. Choose another major with the `NODE_MAJOR` build argument
+(`22`, `24` or `26`), and set the same variable for the tests to assert it:
+
+```sh
+docker buildx build --load --network host --build-arg NODE_MAJOR=24 --target runtime -t nginx-nodejs:node24 .
+IMAGE=nginx-nodejs:node24 NODE_MAJOR=24 ./tests.sh
 ```
 
 A repeat build reuses cached package stages. Add `--no-cache` to pull fresh Wolfi

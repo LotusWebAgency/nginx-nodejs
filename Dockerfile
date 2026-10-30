@@ -1,7 +1,9 @@
 ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest
+ARG NODE_MAJOR=26
 FROM ${WOLFI_IMAGE} AS node-base
+ARG NODE_MAJOR
 RUN apk upgrade --no-cache \
-    && apk add --no-cache nodejs ca-certificates-bundle \
+    && apk add --no-cache "nodejs-${NODE_MAJOR}" ca-certificates-bundle \
     && apk add --no-cache --virtual .strip-deps binutils \
     && strip --strip-unneeded /usr/bin/node \
     && apk del .strip-deps \
@@ -10,6 +12,7 @@ RUN apk upgrade --no-cache \
     && mkdir -p /app /app/cache /run/nginx-nodejs /var/lib/nginx-nodejs \
     && chown -R node:node /app /app /run/nginx-nodejs /var/lib/nginx-nodejs
 ENV NPM_CONFIG_CACHE=/tmp/npm-cache
+LABEL com.lotuswebagency.node-major="${NODE_MAJOR}"
 
 FROM node-base AS fluent-bit-build
 RUN apk add --no-cache fluent-bit build-base cmake bison flex curl openssl-dev yaml-dev

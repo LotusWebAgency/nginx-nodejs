@@ -5,36 +5,57 @@ Platform: `linux/amd64`. Usage and configuration are in [README.md](README.md).
 
 ## Tags
 
+Pick a Node.js major with the tag. `latest` and `builder` are the newest major (26).
+
 | Tag | Contents |
 |---|---|
-| `latest` | The runtime image. Moves on every merge to `main` and on the weekly rebuild. |
-| `26.12.1` | The runtime image with that exact Node.js version (an example). Republished in place, with a new digest and the same tag, while that version is current. |
-| `26.12` | The newest patch release of that Node.js minor. |
-| `builder` | The build-stage image with Node.js and npm. |
-| `26.12.1-builder`, `26.12-builder` | The same version tags for the builder. |
+| `latest`, `26` | The runtime image on Node.js 26. Moves on every merge to `main` and on the weekly rebuild. |
+| `24`, `22` | The runtime image on that Node.js major. |
+| `26.12.1`, `26.12` | The runtime image with that exact Node.js version (an example), republished in place, with a new digest and the same tag, while that version is current; or the newest patch release of that minor. The same forms exist for 24 and 22. |
+| `builder`, `26-builder` | The build-stage image on Node.js 26, with Node.js and npm. |
+| `24-builder`, `22-builder` | The builder on that Node.js major. |
+| `26.12.1-builder`, `26.12-builder` | The version tags for the builder (examples). |
 
 Version tags are read out of the built image (`node -p process.versions.node`) after the
 tests and the Trivy gate. A tag cannot claim a version the image does not run.
 
+## Node.js majors
+
+| Node.js | Status in October 2026 | Upstream end of life |
+|---|---|---|
+| 22 | Maintenance LTS | 2027-04-30 |
+| 24 | Maintenance LTS (since 2026-10-20) | 2028-04-30 |
+| 26 | Active LTS (since 2026-10-28) | 2029-04-30 |
+
+Dates are from the [Node.js release schedule](https://github.com/nodejs/Release/blob/main/schedule.json).
+The image does not extend them: plan to move to a newer major before the end-of-life date of
+the one you run.
+
+Each major is built from the matching Wolfi `nodejs-<major>` package. A major tag never
+changes major version; only its minor and patch releases move. `latest` and `builder` move
+to a newer major when one is added to this repository, so name a major in production.
+
 ## What "supported" means
 
-A tag is supported while it is being rebuilt. `latest`, `builder` and the version tags of
-the Node release currently in Wolfi are rebuilt weekly (Mondays, about 04:40 UTC) and on
-every merge to `main`. Once Wolfi's `nodejs` package moves to a newer release, the tags of
-the old release stop moving. They stay pullable but get no further rebuilds or CVE fixes.
+A tag is supported while it is being rebuilt. `latest`, `builder`, the major tags and the
+version tags of the Node releases currently in Wolfi are rebuilt weekly (Mondays, about
+04:40 UTC) and on every merge to `main`. Once Wolfi's `nodejs-<major>` package moves to a
+newer minor, the tags of the old minor stop moving. If Wolfi drops a major, its tags stop
+being rebuilt. They stay pullable but get no further rebuilds or CVE fixes.
 
-There is no long-term support line and no security patch deadline. The image follows
-Wolfi's current Node.js, whatever its release status.
+There is no long-term support line and no security patch deadline beyond that. Each major
+follows Wolfi's current package for it, whatever its upstream release status.
 
 ## Floating packages
 
-The Wolfi base, Node.js, npm, Nginx and s6 are unversioned. A rebuild takes whatever Wolfi
-currently ships, so `latest` can change Node major version without a change in this
-repository. Nothing publishes unless `tests.sh` and the Trivy gate pass first, but that is a
-check on the new build, not a promise of compatibility with your application.
+The Wolfi base, Node.js (within the chosen major), npm, Nginx and s6 are unversioned. A
+rebuild takes whatever Wolfi currently ships, so a tag can change minor or patch version
+without a change in this repository. Nothing publishes unless `tests.sh` and the Trivy gate
+pass first, but that is a check on the new build, not a promise of compatibility with your
+application.
 
-To stay on one Node major, pin the `<major.minor>` tag. To get the exact bytes you tested,
-pin the digest:
+To stay on one Node.js minor, pin the `<major.minor>` tag. To get the exact bytes you
+tested, pin the digest:
 
 ```dockerfile
 FROM lotuswebagency/nginx-nodejs:26.12@sha256:...
