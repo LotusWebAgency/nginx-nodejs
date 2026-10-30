@@ -102,7 +102,7 @@ jobs:
             tags: |
               type=raw,value=26-builder
               type=raw,value=builder
-    uses: vdementev/docker-workflows/.github/workflows/build-image.yml@v1
+    uses: LotusWebAgency/docker-workflows/.github/workflows/build-image.yml@v1
     permissions:
       contents: read
       id-token: write
@@ -146,14 +146,15 @@ jobs:
         org.opencontainers.image.authors=Vasilii Dementev https://vasiliidementev.com
         org.opencontainers.image.licenses=MIT
     # Environment secrets resolve in the called job only when the caller inherits secrets
-    # (actions/runner#4453). The repo holds no other secrets, and pull-request runs never
-    # enter `release`, so they still see none.
+    # (actions/runner#4453), and inherit works only within one organization, hence the
+    # LotusWebAgency mirror of the workflows. The repo holds no other secrets, and
+    # pull-request runs never enter `release`, so they still see none.
     secrets: inherit
 
   sync-description:
     if: github.event_name != 'pull_request'
     needs: build
-    uses: vdementev/docker-workflows/.github/workflows/sync-description.yml@v1
+    uses: LotusWebAgency/docker-workflows/.github/workflows/sync-description.yml@v1
     with:
       namespace: lotuswebagency
       image: nginx-nodejs

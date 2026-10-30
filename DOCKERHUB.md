@@ -437,7 +437,7 @@ Verify what you pulled:
 # The signing identity is the shared build workflow; the second flag ties it to this repo.
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github\.com/vdementev/docker-workflows/\.github/workflows/build-image\.yml@' \
+  --certificate-identity-regexp '^https://github\.com/LotusWebAgency/docker-workflows/\.github/workflows/build-image\.yml@' \
   --certificate-github-workflow-repository LotusWebAgency/nginx-nodejs \
   lotuswebagency/nginx-nodejs:latest
 ```

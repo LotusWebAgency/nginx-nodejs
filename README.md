@@ -494,7 +494,7 @@ Verify what you pulled:
 # The signing identity is the shared build workflow; the second flag ties it to this repo.
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github\.com/vdementev/docker-workflows/\.github/workflows/build-image\.yml@' \
+  --certificate-identity-regexp '^https://github\.com/LotusWebAgency/docker-workflows/\.github/workflows/build-image\.yml@' \
   --certificate-github-workflow-repository LotusWebAgency/nginx-nodejs \
   lotuswebagency/nginx-nodejs:latest
 ```
@@ -507,7 +507,7 @@ which are compiled from source. Their versions are recorded in the image labels
 ## CI
 
 `.github/workflows/ci.yml` is a thin caller of the shared reusable workflow in
-[`vdementev/docker-workflows`](https://github.com/vdementev/docker-workflows), pinned to
+[`LotusWebAgency/docker-workflows`](https://github.com/LotusWebAgency/docker-workflows), pinned to
 `@v1`, with a matrix of three Node.js majors (22, 24, 26) by two targets (`runtime`, `builder`):
 six builds, each tested with `NODE_MAJOR` set so the image must run that major.
 

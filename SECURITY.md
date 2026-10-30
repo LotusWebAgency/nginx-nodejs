@@ -13,7 +13,7 @@ No response-time guarantee is made. A fix ships as a rebuild of the current tags
 ## What is automated
 
 Every build (pull request, merge to `main`, weekly rebuild) runs the shared pipeline in
-[vdementev/docker-workflows](https://github.com/vdementev/docker-workflows):
+[LotusWebAgency/docker-workflows](https://github.com/LotusWebAgency/docker-workflows):
 
 - `tests.sh` runs against the built image. Publishing waits for it.
 - A Trivy scan fails the build on any fixable CRITICAL or HIGH finding before an image can
@@ -31,7 +31,7 @@ Verify what you pulled:
 # The signing identity is the shared build workflow; the second flag ties it to this repo.
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github\.com/vdementev/docker-workflows/\.github/workflows/build-image\.yml@' \
+  --certificate-identity-regexp '^https://github\.com/LotusWebAgency/docker-workflows/\.github/workflows/build-image\.yml@' \
   --certificate-github-workflow-repository LotusWebAgency/nginx-nodejs \
   lotuswebagency/nginx-nodejs:latest
 ```

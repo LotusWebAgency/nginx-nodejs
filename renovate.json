@@ -73,7 +73,7 @@
         "github-actions"
       ],
       "matchDepNames": [
-        "vdementev/docker-workflows"
+        "LotusWebAgency/docker-workflows"
       ],
       "enabled": false
     }
