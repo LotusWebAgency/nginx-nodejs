@@ -76,8 +76,8 @@ build stages. The `builder` image adds npm to the same base and runs as the same
 | Default command | `node /usr/share/nginx-nodejs/demo/server.mjs`, a demo app. Replace it with your own. |
 | User | `node`, UID and GID 1000. This includes the Nginx master. The container refuses to start as any other UID. |
 | Working directory | `/app`, owned by `node`. |
-| Port | `8080/tcp`, Nginx. Node listens on loopback only (`127.0.0.1`, `NODE_PORT`). An internal static server uses loopback `8081`. |
-| Healthcheck | Baked: `node /etc/nginx-nodejs/healthcheck.mjs`, every 10 s, 5 s timeout, 30 s start period, 3 retries. |
+| Port | `8080/tcp`, Nginx. Node listens on loopback only (`127.0.0.1`, `NODE_PORT`). |
+| Healthcheck | Baked: `node /etc/nginx-nodejs/healthcheck.mjs`, every 10 s (every 1 s during the 30 s start period), 5 s timeout, 3 retries; healthy a few seconds after start. |
 | Stop signal | `SIGTERM`. Allow 45 seconds. |
 | Exit codes | `78` for invalid configuration, printed as `Runtime configuration error: ...` on stderr. `1` when the Node or Nginx child exits. |
 | Logs | Application and Nginx output goes through a sanitizing wrapper into `/var/lib/nginx-nodejs/logs/{node,nginx,nginx-error}/current`, not to `docker logs`. |
@@ -180,7 +180,7 @@ variables are visible to your application. See [Send to Loki](#send-to-loki) for
 |---|---|---|
 | `APP_DIR` | `/app` | Working directory for the Node child |
 | `STATIC_ROOT` | `/app/public` | Nginx static root. May contain dot directories such as `.output` |
-| `NODE_PORT` | `3000` | 1024 to 65535, excluding 8080 and 8081 |
+| `NODE_PORT` | `3000` | 1024 to 65535, excluding 8080 |
 | `NODE_HEALTH_PATH` | `/healthz` | Absolute path that must return `200` from Node and from the public listener |
 | `RUNTIME_MODE` | `prod` | `prod`: static files first, then Node. `dev`: proxy every request to Node |
 | `APP_ENV` | `production` | Loki `environment` label |
@@ -188,6 +188,9 @@ variables are visible to your application. See [Send to Loki](#send-to-loki) for
 | `LOG_SERVICE` | `nginx-nodejs` | Service name in log events, the collector filter and the Loki `service` label |
 | `PUBLIC_SCHEME` | `http` | `http` or `https`. Sent to Node as `X-Forwarded-Proto` |
 | `INGRESS_TRUSTED_IPS` | empty | Comma-separated IPs or CIDRs of trusted ingress proxies. None are trusted by default |
+| `NGINX_WORKER_PROCESSES` | from the CPU limit | Integer 1 to 64, or `auto`. Unset: `ceil(quota / period)` from cgroup v2 `cpu.max` (so `--cpus 1.5` gives 2), capped at the CPUs the container may use; with no quota, all of them |
+| `NGINX_WORKER_CONNECTIONS` | `4096` | Integer 64 to 65535. `worker_rlimit_nofile` is set to twice this plus 256, within the hard limit |
+| `NODE_MAX_OLD_SPACE_SIZE` | derived | Integer MB (at least 16) or `off`. Sets `--max-old-space-size` for the application only. Unset: with a cgroup v2 memory limit, 75% of the limit minus a 160 MB allowance for Nginx and the helper processes (floor 64 MB); with no limit, V8's default. Skipped when `NODE_OPTIONS` or the command already sets the flag |
 | `FLUENT_BIT_FILTERS_FILE` | unset | Mounted JSON array of extra collector filters, see [Logs](#logs) |
 
 `LOG_SERVICE` and `APP_ENV` take 1 to 64 letters, digits, underscores and hyphens, and
@@ -212,6 +215,17 @@ and `Cache-Control` values are reused. WebSocket and other `Upgrade` requests ar
 forwarded to Node. Request bodies up to 51 MiB are accepted. Nginx waits up to 5 seconds to connect to Node
 and 60 seconds for a response.
 
+Nginx keeps up to 32 idle connections per worker open to Node and reuses them, closing
+an idle one after 4 seconds. Node's default `server.keepAliveTimeout` is 5 seconds; if your
+application lowers it below 4 seconds (or sets it to 0), raise it, or the occasional
+request may hit a connection Node is closing and fail with `502`. Frameworks that set a
+longer timeout need no change.
+
+On start, Nginx runs one worker per CPU of the container's quota (`NGINX_WORKER_PROCESSES`
+overrides), and the application's V8 heap is capped below the container memory limit
+(`NODE_MAX_OLD_SPACE_SIZE` overrides). `UV_THREADPOOL_SIZE` is left at Node's default of 4;
+set it yourself for applications that do heavy file, crypto or DNS work.
+
 ## Static files and caching
 
 In `prod` mode Nginx serves an existing file or a directory's `index.html` first and falls
@@ -234,10 +248,18 @@ requests to `.br` and `.gz` files. In `dev` mode the same dot, `src`, `node_modu
 are blocked too.
 
 Responses of types text, CSS, JavaScript, JSON, XML and SVG of at least 512 bytes are
-compressed at request time with Brotli or gzip (level 5). If a `.br` or `.gz` sibling of
-a static file exists, it is served as is. The image does not create them; precompress in
-your build. Byte ranges and conditional requests (`304`) are answered by the internal
-static server, so they work for static files and for precompressed siblings. Consumer
+compressed at request time with Brotli (level 4) or gzip (level 5). **Precompress your
+assets for production**: if a `.br` or `.gz` sibling of a static file exists, it is served
+as is, with no CPU cost per request, and at a higher compression ratio than request-time
+compression allows. The image does not create them; run `brotli -k -q 11` and
+`gzip -k -9` (or your bundler's compression plugin) over the static root in your build.
+Nginx serves static files directly on port 8080, with an `open_file_cache` (10 s
+revalidation, so a file created or replaced at runtime appears within about 10 s).
+Conditional requests (`304`) work everywhere. Byte ranges work for files that are not
+compressed at request time: precompressed siblings (ranges address the encoded bytes) and
+types outside the compressible list, such as video, audio, PDF and archives. A range request for a compressible
+text file with no sibling is answered with the full compressed response (`200`), which
+HTTP allows. Proxied Node responses are never range-processed by Nginx. Consumer
 policies belong in `routes.prod.conf`, `routes.dev.conf`, `proxy.conf` and `nginx.conf`
 under `/etc/nginx-nodejs`.
 
@@ -332,9 +354,9 @@ This is not lossless delivery.
 
 The healthcheck verifies, in order: the supervisor and its state flags, the Nginx and
 Node processes and their parentage, the Nginx event relay, the three ready log writers,
-a `200` from `NODE_HEALTH_PATH` on the public listener and on Node, the internal static
-server, and, when `LOKI_ENABLED=1`, the Fluent Bit process. External Loki availability is
-not a health condition.
+a `200` from `NODE_HEALTH_PATH` on the public listener and on Node, a `200` from the
+loopback-only `/__container_health` route, and, when `LOKI_ENABLED=1`, the Fluent Bit
+process. External Loki availability is not a health condition.
 
 If Node or Nginx exits, the container stops with exit code 1. If the collector fails, only
 the collector restarts, after 5 seconds. On `SIGTERM` the supervisor stops every service.
@@ -391,8 +413,12 @@ Runtime checks:
 - A custom command line, `NODE_PORT`, `NODE_HEALTH_PATH` and `STATIC_ROOT`.
 - Immutable `/assets/` against revalidating static files, and `no-store` for uncached and
   error responses.
-- Runtime Brotli and gzip, and a precompressed `.gz` sibling.
-- Byte ranges and conditional `304`.
+- Runtime Brotli and gzip, and precompressed `.gz` and `.br` siblings.
+- Byte ranges (including on both siblings and the plain `416`) and conditional `304`.
+- WebSocket upgrade, upstream connection reuse, and a range request that falls back to Node.
+- CPU and memory limits: `--cpus 2` gives 2 Nginx workers, `--memory 512m` caps the app
+  heap, and the `NGINX_WORKER_PROCESSES` and `NODE_MAX_OLD_SPACE_SIZE` overrides apply.
+- Invalid `NGINX_*` and `NODE_MAX_OLD_SPACE_SIZE` values exit 78.
 - Blocked dot, source, source map and sidecar paths.
 - A forged `X-Forwarded-For` is replaced, and `PUBLIC_SCHEME` is forwarded.
 - Security headers.
