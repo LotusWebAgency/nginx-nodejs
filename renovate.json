@@ -3,17 +3,69 @@
   "extends": [
     "config:best-practices"
   ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "timezone": "Etc/UTC",
+  "customManagers": [
+    {
+      "description": "The Wolfi base pinned by digest in the Dockerfile's ARG WOLFI_IMAGE; the tag floats on latest, so updates are digest refreshes",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG WOLFI_IMAGE=(?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "loose"
+    },
+    {
+      "description": "Fluent Bit source version, marked by a renovate comment above its ARG in the Dockerfile. FLUENT_BIT_SHA256 is not updated by Renovate: set it to the sha256 of the new codeload tarball in the same PR",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG FLUENT_BIT_VERSION=(?<currentValue>\\S+)"
+      ],
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ],
   "packageRules": [
     {
-      "description": "Wolfi base and APK packages float by design; the weekly rebuild refreshes them",
+      "description": "The Dockerfile manager must not also pin the Wolfi base: the custom manager above already does",
       "matchManagers": [
         "dockerfile"
       ],
       "matchDepNames": [
         "cgr.dev/chainguard/wolfi-base"
       ],
-      "pinDigests": false,
       "enabled": false
+    },
+    {
+      "description": "Auto-merge Wolfi base digest refreshes once CI is green (CI verifies the new digest's Chainguard signature before building on it); apk upgrade still refreshes packages on the weekly rebuild",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDepNames": [
+        "cgr.dev/chainguard/wolfi-base"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pin"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Fluent Bit bumps stay reviewed PRs: the Dockerfile's FLUENT_BIT_SHA256 needs a manual update",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDepNames": [
+        "fluent/fluent-bit"
+      ],
+      "automerge": false
     },
     {
       "description": "Keep the floating @v1 ref to our reusable workflows",

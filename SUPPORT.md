@@ -48,11 +48,11 @@ follows Wolfi's current package for it, whatever its upstream release status.
 
 ## Floating packages
 
-The Wolfi base, Node.js (within the chosen major), npm, Nginx and s6 are unversioned. A
-rebuild takes whatever Wolfi currently ships, so a tag can change minor or patch version
-without a change in this repository. Nothing publishes unless `tests.sh` and the Trivy gate
-pass first, but that is a check on the new build, not a promise of compatibility with your
-application.
+Node.js (within the chosen major), npm, Nginx and s6 are unversioned, and the Wolfi base
+digest moves whenever Renovate merges a refresh. A rebuild takes whatever Wolfi currently
+ships, so a tag can change minor or patch version without a change in this repository.
+Nothing publishes unless `tests.sh` and the Trivy gates pass first, but that is a check on the
+new build, not a promise of compatibility with your application.
 
 To stay on one Node.js minor, pin the `<major.minor>` tag. To get the exact bytes you
 tested, pin the digest:
@@ -65,10 +65,10 @@ FROM lotuswebagency/nginx-nodejs:26.12@sha256:...
 
 Two components are compiled in the Dockerfile rather than installed from a package:
 
-- **Fluent Bit** is built from the upstream tag that matches the version the Wolfi
-  `fluent-bit` package selects, with only the plugins the collector needs. One header
-  include is added to `src/flb_http_client.c` during the build. Wolfi's own patches are not
-  inherited. The patch needs review when upstream changes that file.
+- **Fluent Bit** is built from a pinned upstream tag (`FLUENT_BIT_VERSION`, with the tarball's
+  `FLUENT_BIT_SHA256`, both in the Dockerfile), with only the plugins the collector needs.
+  One header include is added to `src/flb_http_client.c` during the build. Wolfi's own
+  patches are not inherited. The patch needs review when upstream changes that file.
 - **ngx_brotli** is built from a pinned upstream commit, verified by SHA-256, against the
   Nginx source package that matches the installed Nginx. A local patch
   ([`docker/ngx_brotli-ranges.patch`](docker/ngx_brotli-ranges.patch)) enables byte ranges

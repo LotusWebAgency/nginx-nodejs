@@ -32,6 +32,7 @@ cleanup() {
     docker ps -aq --filter "label=$LABEL" | xargs -r docker rm -f >/dev/null 2>&1 || true
     docker volume ls -q --filter "label=$LABEL" | xargs -r docker volume rm >/dev/null 2>&1 || true
     [ -z "${fixture:-}" ] || rm -rf "$fixture"
+    [ -z "${elf_dir:-}" ] || rm -rf "$elf_dir"
 }
 trap cleanup EXIT
 
@@ -93,12 +94,70 @@ exit_code() {
     timeout 60 docker wait "$1"
 }
 
+# ------------------------------------------------------- hardened deployment
+# The flags documented in README.md "Hardened deployment"; the fixture container below runs with
+# exactly these, so the gate proves the image works locked down.
+HARDENED_FLAGS=(--read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256
+    --tmpfs "/run/nginx-nodejs:noexec,nosuid,nodev,uid=1000,gid=1000,mode=0700"
+    --tmpfs "/tmp:noexec,nosuid,nodev,uid=1000,gid=1000,mode=1777")
+
+# ---------------------------------------------------------- binary hardening
+# Compiled here, not packaged, so the flags are asserted on the produced files. readelf is not in
+# the image: copy the files out and read them on the host (GitHub's ubuntu runners have binutils).
+command -v readelf >/dev/null || { echo "readelf (binutils) is required on the host" >&2; exit 2; }
+elf_dir="$(mktemp -d)"
+elf_source="$(docker create --label "$LABEL" "$IMAGE")"
+for elf in /usr/bin/fluent-bit /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so /usr/lib/nginx/modules/ngx_http_brotli_static_module.so; do
+    docker cp "$elf_source:$elf" "$elf_dir/" >/dev/null
+done
+docker rm "$elf_source" >/dev/null
+machine="$(readelf -hW "$elf_dir/fluent-bit" | sed -n 's/^ *Machine: *//p')"
+
+# elf_hardened <file>: PIE/PIC (ET_DYN), full RELRO, non-executable stack, stack protector.
+# Output is captured before grepping: under pipefail, `readelf | grep -q` fails on SIGPIPE.
+elf_hardened() {
+    local file="$1" header program dynamic symbols
+    header="$(readelf -hW "$file")" && program="$(readelf -lW "$file")" \
+        && dynamic="$(readelf -dW "$file")" && symbols="$(readelf -sW --dyn-syms "$file")" || return 1
+    grep -q 'Program Headers:' <<<"$program" || return 1
+    grep -qE '^ *Type: +DYN' <<<"$header" || return 1
+    grep -q 'GNU_RELRO' <<<"$program" || return 1
+    grep -qE 'BIND_NOW|FLAGS_1.*\bNOW\b' <<<"$dynamic" || return 1
+    grep -qE 'GNU_STACK.* RW +' <<<"$program" || return 1
+    grep -q '__stack_chk_fail' <<<"$symbols" || return 1
+}
+# elf_fortified <file>: fortified libc calls, i.e. __*_chk among the dynamic symbols.
+elf_fortified() {
+    local symbols
+    symbols="$(readelf -sW --dyn-syms "$1")" || return 1
+    grep -qE ' __[a-z_0-9]+_chk(@| |$)' <<<"$symbols"
+}
+# elf_ibt <file>: the x86 feature note marks the file IBT-compatible (amd64 only).
+elf_ibt() {
+    local notes
+    notes="$(readelf -nW "$1")" || return 1
+    grep -E 'x86 feature' <<<"$notes" | grep -q 'IBT'
+}
+check "fluent-bit: PIE, full RELRO, non-exec stack, stack protector" elf_hardened "$elf_dir/fluent-bit" exe
+check "fluent-bit: fortified libc calls (__*_chk imports)" elf_fortified "$elf_dir/fluent-bit"
+for module in ngx_http_brotli_filter_module ngx_http_brotli_static_module; do
+    check "$module.so: PIC, full RELRO, non-exec stack, stack protector" elf_hardened "$elf_dir/$module.so" so
+done
+if grep -q 'X86-64' <<<"$machine"; then
+    check "fluent-bit: IBT landing-pad note" elf_ibt "$elf_dir/fluent-bit"
+fi
+
 # ------------------------------------------------------------------ demo app
 demo="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 "$IMAGE")"
 check "demo: healthcheck passes" wait_healthy "$demo"
 check "runs as UID/GID 1000" sh -c "[ \"\$(docker exec $demo id -u):\$(docker exec $demo id -g)\" = 1000:1000 ]"
 [ -z "$NODE_MAJOR" ] || check "node is major $NODE_MAJOR" node_major_is
 check "no setuid/setgid files" sh -c "[ -z \"\$(docker exec $demo find / -xdev -perm /6000 -type f)\" ]"
+busybox_net_applets="$(sed -n 's/^ARG BUSYBOX_NET_APPLETS="\(.*\)"$/\1/p' "$(dirname "$0")/Dockerfile")"
+[ -n "$busybox_net_applets" ] || { echo "BUSYBOX_NET_APPLETS not found in the Dockerfile" >&2; exit 2; }
+net_applets="$(docker exec "$demo" sh -c 'for applet in $1; do for dir in /bin /sbin /usr/bin /usr/sbin; do if [ -e "$dir/$applet" ] || [ -L "$dir/$applet" ]; then echo "$dir/$applet"; fi; done; done' sh "$busybox_net_applets")"
+check "busybox network applets are pruned${net_applets:+ (still present: $net_applets)}" test -z "$net_applets"
+check "wget and nc are not available" sh -c "! docker exec $demo sh -c 'command -v wget || command -v nc'"
 expect "demo: Node answers /" "$demo" '.status == 200 and (.body | startswith("nginx-nodejs is running")) and .headers["cache-control"] == "no-store" and (.headers["x-request-id"] | length > 0)' GET /
 expect "demo: static file from STATIC_ROOT" "$demo" '.status == 200 and .headers["cache-control"] == "public, max-age=0"' GET /demo.txt
 docker restart -t 45 "$demo" >/dev/null
@@ -172,9 +231,7 @@ JS
 chmod -R a+rX "$fixture"
 
 docker volume create --label "$LABEL" "nginx-nodejs-tests-$$" >/dev/null
-app="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 --read-only \
-    --tmpfs /run/nginx-nodejs:uid=1000,gid=1000,mode=0700 \
-    --tmpfs /tmp:uid=1000,gid=1000,mode=1777 \
+app="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 "${HARDENED_FLAGS[@]}" \
     -v "nginx-nodejs-tests-$$:/var/lib/nginx-nodejs" \
     -v "$fixture:/fixture:ro" \
     -e APP_DIR=/fixture -e STATIC_ROOT=/fixture/.output/public \
@@ -185,7 +242,7 @@ app="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 --
     -e 'LOKI_BEARER_TOKEN=literal${HOME}token' -e LOKI_TENANT_ID=tenant-ci \
     "$IMAGE" node /fixture/server.mjs '$HOME' 'two words')"
 docker exec -d "$app" node /fixture/loki.cjs
-check "read-only root: healthcheck passes with collector enabled" wait_healthy "$app"
+check "hardened run flags: healthcheck passes with collector enabled" wait_healthy "$app"
 
 expect "custom argv is passed literally, cwd is APP_DIR, port is NODE_PORT" "$app" \
     '.status == 200 and (.body | fromjson | .argv == ["$HOME", "two words"] and .cwd == "/fixture" and .port == 3007)' GET /echo
