@@ -56,8 +56,8 @@ tests and the Trivy gate, never from the Dockerfile, so a tag cannot claim a Nod
 the image does not run.
 
 Each major tag follows the matching Wolfi `nodejs-<major>` package, so minor and patch
-releases arrive with rebuilds and the major never changes under a major tag. Nginx and the
-Wolfi base are not pinned either. `latest` moves to a newer major when one is added here, so
+releases arrive with rebuilds and the major never changes under a major tag. Nginx floats
+(`apk upgrade` runs on every rebuild); the Wolfi base is pinned by digest. `latest` moves to a newer major when one is added here, so
 production images should name a major (`24`) or, better, a `<major.minor>` tag or digest:
 
 ```dockerfile
@@ -75,12 +75,13 @@ keyless Cosign signature. Tag policy:
   Chainguard's signature in CI. Node.js 22, 24 or 26 from the Wolfi `nodejs-<major>` package.
 - **Nginx** (Wolfi `nginx-mainline`) with the **ngx_brotli** filter and static modules,
   built from a pinned upstream commit, checked by SHA-256, with a local patch for byte
-  ranges and `416` responses.
+  ranges and `416` responses, plus **headers-more**, so a `416` carries each security header once.
 - **s6** supervision with bounded `s6-log` writers.
 - **Fluent Bit**, compiled from a pinned upstream tag checked by SHA-256, with only the
   plugins the collector needs, one header patch and hardening flags (stack protector,
-  `_FORTIFY_SOURCE=3`, PIE, full RELRO). The Brotli modules get the same flags.
-- Busybox without its network applets. Wolfi's busybox has no `wget` or `nc`.
+  `_FORTIFY_SOURCE=3`, PIE, full RELRO). The Nginx modules get the same flags.
+- Busybox with its network applet links removed; Wolfi's busybox has no `wget` or `nc`.
+  Defense in depth: the binary keeps the applets.
 - CA certificates, so Loki over TLS verifies against the system store.
 
 The runtime has no npm and no application dependencies. The `builder` image adds npm to the
@@ -196,6 +197,7 @@ mounted `noexec`; the image does not execute anything from either path):
 
 ```yaml
 spec:
+  terminationGracePeriodSeconds: 45
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000
@@ -256,7 +258,7 @@ variables are visible to your application. The Loki credentials have `*_FILE` va
 | `INGRESS_TRUSTED_IPS` | empty | Comma-separated IPs or CIDRs of trusted ingress proxies. None are trusted by default |
 | `NGINX_WORKER_PROCESSES` | from the CPU limit | Integer 1 to 64, or `auto`. Unset: `ceil(quota / period)` from cgroup v2 `cpu.max` (so `--cpus 1.5` gives 2), capped at the CPUs the container may use; with no quota, all of them |
 | `NGINX_WORKER_CONNECTIONS` | `4096` | Integer 64 to 65535. `worker_rlimit_nofile` is set to twice this plus 256, within the hard limit |
-| `NODE_MAX_OLD_SPACE_SIZE` | derived | Integer MB (at least 16) or `off`. Sets `--max-old-space-size` for the application only. Unset: with a cgroup v2 memory limit, 75% of the limit minus a 160 MB allowance for Nginx and the helper processes (floor 64 MB); with no limit, V8's default. Skipped when `NODE_OPTIONS` or the command already sets the flag |
+| `NODE_MAX_OLD_SPACE_SIZE` | derived | Integer MB (at least 16) or `off`. Sets `--max-old-space-size` for the application only. Unset: with a cgroup v2 memory limit, (limit - 160 MB) x 0.75, where 160 MB is the allowance for Nginx and the helper processes (floor 64 MB); with no limit, V8's default. Skipped when `NODE_OPTIONS` (any spelling) or the command already sets the flag |
 | `FLUENT_BIT_FILTERS_FILE` | unset | Mounted JSON array of extra collector filters |
 
 `LOG_SERVICE` and `APP_ENV` take 1 to 64 letters, digits, underscores and hyphens, and must
@@ -316,7 +318,9 @@ CPU cost per request. The image does not create them; run `brotli -k -q 11` and
 8080 with an `open_file_cache` (10 s revalidation). Conditional requests (`304`) work
 everywhere. Byte ranges work for precompressed siblings and for types that are not
 compressed at request time (video, audio, PDF, archives); a range request for a compressible
-text file with no sibling gets the full compressed response (`200`).
+text file with no sibling gets the full compressed response (`200`), as does a multi-range
+request. Static symlinks are followed only when link and target share an owner.
+`NODE_OPTIONS` reaches only your app process.
 
 ## Logs
 
@@ -438,9 +442,10 @@ cosign verify \
   lotuswebagency/nginx-nodejs:latest
 ```
 
-Trivy reads the APK database, so it does not see Fluent Bit and ngx_brotli, which are
+Trivy reads the APK database, so it does not see Fluent Bit, ngx_brotli and headers-more,
 compiled from source. Their versions are recorded in the image labels
-`com.lotuswebagency.fluent-bit.version` and `com.lotuswebagency.ngx-brotli.commit`. Reporting, scope and boundaries:
+`com.lotuswebagency.fluent-bit.version`, `com.lotuswebagency.ngx-brotli.commit` and
+`com.lotuswebagency.headers-more.commit`. Reporting, scope and boundaries:
 [SECURITY.md](https://github.com/LotusWebAgency/nginx-nodejs/blob/main/SECURITY.md).
 
 ## Tests
@@ -451,10 +456,9 @@ covers: rootless UID 1000 and no setuid or setgid files, the full healthcheck, t
 route and a static file, a custom command line and port, caching headers, Brotli and gzip
 and precompressed siblings, byte ranges and `304`, blocked paths, forged `X-Forwarded-For`,
 security headers, secret canaries absent from persisted logs, Loki delivery with bearer
-authentication against a mock server, the hardened run flags (read-only root, no capabilities, `noexec` tmpfs) and restart
-without tmpfs, absent busybox network applets, binary hardening of Fluent Bit and the Brotli
-modules,
-supervision when the Node child exits, and exit code 78 for invalid settings. The full list is
+authentication against a mock server, the hardened run flags (read-only root, no capabilities,
+`noexec` tmpfs) and restart without tmpfs, absent busybox network applets, binary hardening
+of Fluent Bit and the Nginx modules, single headers on `416`, symlinks, `NODE_OPTIONS`, supervision when the Node child exits, and exit code 78 for invalid settings. The full list is
 in the [README](https://github.com/LotusWebAgency/nginx-nodejs#tests).
 
 Not covered by automated tests: Loki over TLS or with basic authentication against a real
@@ -477,5 +481,5 @@ Built and maintained by [Vasilii Dementev](https://vasiliidementev.com) at
 [Lotus Web Agency](https://lotuswebagency.com). Issues and pull requests:
 [github.com/LotusWebAgency/nginx-nodejs](https://github.com/LotusWebAgency/nginx-nodejs).
 
-Packaging in this repository is MIT licensed. Node.js, Nginx, ngx_brotli, s6, Fluent Bit and
+Packaging in this repository is MIT licensed. Node.js, Nginx, ngx_brotli, headers-more, s6, Fluent Bit and
 the other bundled software keep their own upstream licenses.
