@@ -49,13 +49,16 @@ keyless Cosign signature. Tag policy:
 
 ## What is inside
 
-- **Wolfi** base (`cgr.dev/chainguard/wolfi-base`), Node.js from the Wolfi `nodejs` package.
+- **Wolfi** base (`cgr.dev/chainguard/wolfi-base`), pinned by digest and verified against
+  Chainguard's signature in CI. Node.js comes from the Wolfi `nodejs` package.
 - **Nginx** (Wolfi `nginx-mainline`) with the **ngx_brotli** filter and static modules,
   built from a pinned upstream commit, checked by SHA-256, with a local patch for byte
   ranges and `416` responses.
 - **s6** supervision with bounded `s6-log` writers.
-- **Fluent Bit**, compiled from the upstream tag that matches the version the Wolfi package
-  selects, with only the plugins the collector needs and one header patch.
+- **Fluent Bit**, compiled from a pinned upstream tag checked by SHA-256, with only the
+  plugins the collector needs, one header patch and hardening flags (stack protector,
+  `_FORTIFY_SOURCE=3`, PIE, full RELRO). The Brotli modules get the same flags.
+- Busybox without its network applets. Wolfi's busybox has no `wget` or `nc`.
 - CA certificates, so Loki over TLS verifies against the system store.
 
 The runtime has no npm and no application dependencies. The `builder` image adds npm to the
@@ -126,6 +129,78 @@ be a volume: it holds the logs, the collector checkpoints and the Loki queue. Gi
 running container its own volume. Bind mounts need permissions that UID 1000 can use.
 
 Put an ingress proxy in front for external TLS. Do not expose port 8080 directly.
+
+### Hardened deployment
+
+The image runs with all of this applied. `tests.sh` starts its fixture container with exactly
+these flags, so every release proves it. Nothing in the image needs a capability, a writable
+root or an executable tmpfs.
+
+```sh
+docker run -d --init --name nginx-nodejs-demo \
+  --stop-timeout 45 \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --pids-limit 256 \
+  --tmpfs /run/nginx-nodejs:noexec,nosuid,nodev,uid=1000,gid=1000,mode=0700 \
+  --tmpfs /tmp:noexec,nosuid,nodev,uid=1000,gid=1000,mode=1777 \
+  -v nginx-nodejs-logs:/var/lib/nginx-nodejs \
+  -p 127.0.0.1:8080:8080 lotuswebagency/nginx-nodejs
+```
+
+The compose equivalent:
+
+```yaml
+services:
+  app:
+    image: registry.example.com/my-app:latest
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 45s
+    tmpfs:
+      - /run/nginx-nodejs:noexec,nosuid,nodev,uid=1000,gid=1000,mode=0700
+      - /tmp:noexec,nosuid,nodev,uid=1000,gid=1000,mode=1777
+    volumes:
+      - app-logs:/var/lib/nginx-nodejs
+```
+
+On Kubernetes, with `emptyDir` standing in for the tmpfs mounts (an `emptyDir` cannot be
+mounted `noexec`; the image does not execute anything from either path):
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: registry.example.com/my-app:latest
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - { name: run, mountPath: /run/nginx-nodejs }
+        - { name: tmp, mountPath: /tmp }
+        - { name: state, mountPath: /var/lib/nginx-nodejs }
+  volumes:
+    - { name: run, emptyDir: { medium: Memory } }
+    - { name: tmp, emptyDir: { medium: Memory } }
+    - { name: state, emptyDir: {} }
+```
+
+Use a persistent volume for `state` if the Loki queue must survive a pod restart. Your
+application may need more writable mounts for its own caches.
 
 ## Use your application
 
@@ -306,9 +381,11 @@ collector 10. Allow 45 seconds in total (`--stop-timeout 45`, `stop_grace_period
 ## Security and provenance
 
 - Rootless: UID and GID 1000 for every process, no setuid or setgid files in the image.
-- A read-only root filesystem is supported with the tmpfs mounts shown above.
+- A read-only root filesystem, dropped capabilities, `no-new-privileges` and `noexec` tmpfs
+  mounts are supported and tested; see Hardened deployment above.
 - Pull requests build, test and scan without publishing. A Trivy gate fails the build on any
-  fixable CRITICAL or HIGH finding.
+  fixable CRITICAL or HIGH finding, any finding in CISA's Known Exploited Vulnerabilities
+  catalog (fixable or not), and any AGPL license.
 - Merging to `main` publishes with an SBOM, max-mode SLSA provenance and a keyless Cosign
   signature. A weekly rebuild (Mondays) picks up new Wolfi packages.
 
@@ -324,7 +401,8 @@ cosign verify \
 ```
 
 Trivy reads the APK database, so it does not see Fluent Bit and ngx_brotli, which are
-compiled from source. Reporting, scope and boundaries:
+compiled from source. Their versions are recorded in the image labels
+`com.lotuswebagency.fluent-bit.version` and `com.lotuswebagency.ngx-brotli.commit`. Reporting, scope and boundaries:
 [SECURITY.md](https://github.com/LotusWebAgency/nginx-nodejs/blob/main/SECURITY.md).
 
 ## Tests
@@ -335,7 +413,9 @@ covers: rootless UID 1000 and no setuid or setgid files, the full healthcheck, t
 route and a static file, a custom command line and port, caching headers, Brotli and gzip
 and precompressed siblings, byte ranges and `304`, blocked paths, forged `X-Forwarded-For`,
 security headers, secret canaries absent from persisted logs, Loki delivery with bearer
-authentication against a mock server, read-only root with tmpfs and restart without it,
+authentication against a mock server, the hardened run flags (read-only root, no capabilities, `noexec` tmpfs) and restart
+without tmpfs, absent busybox network applets, binary hardening of Fluent Bit and the Brotli
+modules,
 supervision when the Node child exits, and exit code 78 for invalid settings. The full list is
 in the [README](https://github.com/LotusWebAgency/nginx-nodejs#tests).
 

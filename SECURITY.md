@@ -17,7 +17,10 @@ Every build (pull request, merge to `main`, weekly rebuild) runs the shared pipe
 
 - `tests.sh` runs against the built image. Publishing waits for it.
 - A Trivy scan fails the build on any fixable CRITICAL or HIGH finding before an image can
-  be published. Findings accepted rather than fixed would be recorded in a root
+  be published. Two further gates fail on any finding in CISA's Known Exploited
+  Vulnerabilities catalog, fixable or not, and on AGPL-licensed packages.
+- Before the build, a `verify-base` job checks the Cosign signature of the pinned Wolfi base
+  digest against Chainguard's release workflow identity. Findings accepted rather than fixed would be recorded in a root
   `.trivyignore` with a reason; the repository has none today.
 - Pull requests build, test and scan without publishing. Only a merge to `main` publishes.
 - Published digests carry an SBOM, max-mode SLSA provenance and a keyless Cosign signature.
@@ -33,8 +36,9 @@ cosign verify \
   lotuswebagency/nginx-nodejs:latest
 ```
 
-The weekly rebuild picks up new Wolfi packages. Node.js, Nginx and the base are not pinned,
-so a rebuild can bring a new Node version. Pin a `<major.minor>` tag or a digest if you need
+The Wolfi base is pinned by digest and refreshed by Renovate. The weekly rebuild runs
+`apk upgrade` and picks up new Wolfi packages. Node.js and Nginx are not pinned, so a rebuild
+can bring a new Node version. Pin a `<major.minor>` tag or a digest if you need
 a fixed one.
 
 ## Controls in the image
@@ -42,7 +46,15 @@ a fixed one.
 - Every process runs as UID and GID 1000, including the Nginx master. The container refuses
   to start as any other UID. The tests check that the image has no setuid or setgid files.
 - A read-only root filesystem is supported. Mount tmpfs at `/run/nginx-nodejs` and `/tmp`,
-  and keep `/var/lib/nginx-nodejs` on a separate volume.
+  and keep `/var/lib/nginx-nodejs` on a separate volume. The tests also run with all
+  capabilities dropped, `no-new-privileges`, a PID limit and `noexec,nosuid,nodev` tmpfs
+  mounts. [Hardened deployment](README.md#hardened-deployment) has the Docker, compose and
+  Kubernetes settings.
+- Fluent Bit and the Brotli modules are compiled with stack protector, `_FORTIFY_SOURCE=3`,
+  stack-clash protection and full RELRO (Fluent Bit also as PIE, and `-fcf-protection` on
+  amd64). The tests check the produced binaries.
+- Busybox network applets (`ping`, `netstat`, `traceroute` and similar) are removed; Wolfi's
+  busybox has no `wget` or `nc`.
 - Node listens on loopback only. The internal static server listens on loopback only.
   Port 8080 is the one public listener, meant to sit behind an ingress proxy that
   terminates TLS.
@@ -65,8 +77,11 @@ a fixed one.
   environment. Use the `*_FILE` variants for Loki credentials and mount the files read-only.
   Never bake credentials into the image or a filter file.
 - **Trivy does not see everything.** It reads the APK database. Fluent Bit and ngx_brotli
-  are compiled from source and are not in it. Fluent Bit follows the version the Wolfi
-  package selects; ngx_brotli is pinned by commit and SHA-256 in the Dockerfile.
+  are compiled from source and are not in it, so neither the SBOM nor the vulnerability
+  scan covers them. Both are pinned in the Dockerfile (`FLUENT_BIT_VERSION` and
+  `FLUENT_BIT_SHA256`, `NGX_BROTLI_COMMIT` and `NGX_BROTLI_SHA256`) and recorded in the image
+  labels `com.lotuswebagency.fluent-bit.version` and `com.lotuswebagency.ngx-brotli.commit`.
+  Check those against upstream advisories yourself.
 - **Not covered by automated tests:** Loki over TLS and with basic authentication against a
   real server, and `linux/arm64`. Delivery with bearer authentication is tested against a
   mock server. These paths are implemented and validated at startup, but treat them as

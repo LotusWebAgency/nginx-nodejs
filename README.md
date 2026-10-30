@@ -52,17 +52,22 @@ keyless Cosign signature. See [Security and provenance](#security-and-provenance
 
 ## What is inside
 
-- **Wolfi** base (`cgr.dev/chainguard/wolfi-base`), Node.js from the Wolfi `nodejs`
-  package.
+- **Wolfi** base (`cgr.dev/chainguard/wolfi-base`), pinned by digest in the Dockerfile and
+  refreshed by Renovate after CI verifies its Chainguard signature. Node.js comes from the
+  Wolfi `nodejs` package; `apk upgrade` runs on every rebuild.
 - **Nginx** (Wolfi `nginx-mainline`) with the **ngx_brotli** filter and static modules.
   ngx_brotli is built from a pinned upstream commit, checked by SHA-256, against the
   installed Nginx source, with a local patch for byte ranges and `416` responses
   ([`docker/ngx_brotli-ranges.patch`](docker/ngx_brotli-ranges.patch)).
 - **s6** supervision with bounded `s6-log` writers.
-- **Fluent Bit**, compiled from the upstream tag that matches the version the Wolfi
-  package selects, with only the plugins the collector needs (tail, grep, modify,
-  record_modifier, Loki and null outputs, JSON and YAML, TLS, SQLite, disk backlog) and one
-  header patch.
+- **Fluent Bit**, compiled from a pinned upstream tag (`FLUENT_BIT_VERSION`, source tarball
+  checked by `FLUENT_BIT_SHA256` in the Dockerfile), with only the plugins the collector needs
+  (tail, grep, modify, record_modifier, Loki and null outputs, JSON and YAML, TLS, SQLite,
+  disk backlog) and one header patch. It is built with stack protector, `_FORTIFY_SOURCE=3`,
+  stack-clash protection, PIE, full RELRO and (on amd64) `-fcf-protection`. The Brotli
+  modules get the same flags.
+- Busybox without its network applets (`ping`, `netstat`, `traceroute`, ...). Wolfi's
+  busybox has no `wget` or `nc`.
 - CA certificates, so Loki over TLS verifies against the system store.
 
 The runtime has no npm and no application dependencies. Compilers stay in intermediate
@@ -134,6 +139,78 @@ each running container its own volume. Bind mounts need permissions that UID 100
 Application caches need their own writable mounts.
 
 Put an ingress proxy in front for external TLS. Do not expose port 8080 directly.
+
+### Hardened deployment
+
+The image runs with all of this applied. `tests.sh` starts its fixture container with exactly
+these flags, so every release proves it. Nothing in the image needs a capability, a writable
+root or an executable tmpfs.
+
+```sh
+docker run -d --init --name nginx-nodejs-demo \
+  --stop-timeout 45 \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --pids-limit 256 \
+  --tmpfs /run/nginx-nodejs:noexec,nosuid,nodev,uid=1000,gid=1000,mode=0700 \
+  --tmpfs /tmp:noexec,nosuid,nodev,uid=1000,gid=1000,mode=1777 \
+  -v nginx-nodejs-logs:/var/lib/nginx-nodejs \
+  -p 127.0.0.1:8080:8080 lotuswebagency/nginx-nodejs
+```
+
+The compose equivalent:
+
+```yaml
+services:
+  app:
+    image: registry.example.com/my-app:latest
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 45s
+    tmpfs:
+      - /run/nginx-nodejs:noexec,nosuid,nodev,uid=1000,gid=1000,mode=0700
+      - /tmp:noexec,nosuid,nodev,uid=1000,gid=1000,mode=1777
+    volumes:
+      - app-logs:/var/lib/nginx-nodejs
+```
+
+On Kubernetes, with `emptyDir` standing in for the tmpfs mounts (an `emptyDir` cannot be
+mounted `noexec`; the image does not execute anything from either path):
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: registry.example.com/my-app:latest
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - { name: run, mountPath: /run/nginx-nodejs }
+        - { name: tmp, mountPath: /tmp }
+        - { name: state, mountPath: /var/lib/nginx-nodejs }
+  volumes:
+    - { name: run, emptyDir: { medium: Memory } }
+    - { name: tmp, emptyDir: { medium: Memory } }
+    - { name: state, emptyDir: {} }
+```
+
+Use a persistent volume for `state` if the Loki queue must survive a pod restart. Your
+application may need more writable mounts for its own caches.
 
 ## Use your application
 
@@ -344,9 +421,14 @@ collector 10. Allow 45 seconds in total (`--stop-timeout 45`, `stop_grace_period
 ## Security and provenance
 
 - Rootless: UID and GID 1000 for every process, no setuid or setgid files in the image.
-- A read-only root filesystem is supported with the tmpfs mounts shown above.
+- A read-only root filesystem, dropped capabilities, `no-new-privileges` and `noexec`
+  tmpfs mounts are supported and tested; see [Hardened deployment](#hardened-deployment).
+- The compiled components (Fluent Bit, the Brotli modules) are checked for PIE, full RELRO,
+  a non-executable stack, stack protector and fortified libc calls.
 - Pull requests build, test and scan without publishing. A Trivy gate fails the build on
-  any fixable CRITICAL or HIGH finding.
+  any fixable CRITICAL or HIGH finding, any finding in CISA's Known Exploited
+  Vulnerabilities catalog (fixable or not), and any AGPL license.
+- The pinned Wolfi base digest must carry Chainguard's keyless signature before CI builds on it.
 - Merging to `main` publishes with an SBOM, max-mode SLSA provenance and a keyless
   Cosign signature.
 
@@ -362,7 +444,9 @@ cosign verify \
 ```
 
 Trivy reads the APK database, so it does not see Fluent Bit and ngx_brotli, which are
-compiled from source. Reporting, scope and boundaries: [SECURITY.md](SECURITY.md).
+compiled from source. Their versions are recorded in the image labels
+`com.lotuswebagency.fluent-bit.version` and `com.lotuswebagency.ngx-brotli.commit`, and pinned in
+the Dockerfile. Reporting, scope and boundaries: [SECURITY.md](SECURITY.md).
 
 ## CI
 
@@ -370,8 +454,9 @@ compiled from source. Reporting, scope and boundaries: [SECURITY.md](SECURITY.md
 [`vdementev/docker-workflows`](https://github.com/vdementev/docker-workflows), pinned to
 `@v1`, with one matrix entry for the `runtime` target and one for `builder`.
 
-1. Pull requests build `linux/amd64`, run `tests.sh` against the built image, then the
-   Trivy gate. Nothing is published.
+1. A `verify-base` job checks the Cosign signature of the pinned Wolfi digest. Then pull
+   requests build `linux/amd64`, run `tests.sh` against the built image, then the Trivy
+   vulnerability, KEV and license gates. Nothing is published.
 2. Merging to `main` publishes `latest` and `builder` plus the version tags, with the SBOM,
    provenance and Cosign signature, and syncs [DOCKERHUB.md](DOCKERHUB.md) to the Docker Hub
    description.
@@ -399,7 +484,13 @@ Runtime checks:
 - Secret canaries are absent from the persisted logs.
 - Loki delivery with bearer authentication and the expected labels, against a mock server
   inside the container.
-- A read-only root with tmpfs mounts, and a restart without them.
+- A fixture container with the full [hardened flags](#hardened-deployment) (read-only root,
+  no capabilities, `no-new-privileges`, PID limit, `noexec` tmpfs mounts), and a restart
+  without tmpfs.
+- `wget`, `nc` and the other busybox network applets are absent.
+- Fluent Bit and both Brotli modules: PIE or PIC, full RELRO, non-executable stack, stack
+  protector, fortified libc calls and, on amd64, the IBT note. These read the binaries with
+  the host's `readelf`.
 - A Node child that exits stops the container with exit code 1.
 - An invalid `NODE_PORT` or a command that does not start with `node` exits with 78.
 
@@ -411,7 +502,8 @@ configuration with `fluent-bit --dry-run`.
 
 ## Build locally
 
-You need Docker Engine with Buildx. Building compiles Fluent Bit and the Brotli modules
+You need Docker Engine with Buildx, and binutils (`readelf`) on the host for the binary
+checks in `tests.sh`. Building compiles Fluent Bit and the Brotli modules
 and downloads their sources from GitHub.
 
 ```sh
