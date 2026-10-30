@@ -52,12 +52,13 @@ fi
 [ "$TARGET" = runtime ] || { echo "TARGET must be runtime or builder" >&2; exit 2; }
 
 # One HTTP request from inside container $1 without decompressing, printed as
-# JSON: {status, headers, body, decoded}. Args: container method path [headers-json].
+# JSON: {status, headers, raw, body, decoded}. `raw` keeps duplicate headers that `headers` merges.
+# Args: container method path [headers-json [source-address]]. Any 127.0.0.0/8 address reaches Nginx.
 read -r -d '' PROBE <<'JS' || true
 const http = require('node:http');
 const zlib = require('node:zlib');
-const [method, path, headers = '{}'] = process.argv.slice(1);
-const request = http.request({ host: '127.0.0.1', port: 8080, method, path, headers: JSON.parse(headers), timeout: 5000 }, response => {
+const [method, path, headers = '{}', localAddress = ''] = process.argv.slice(1);
+const request = http.request({ host: '127.0.0.1', port: 8080, method, path, headers: JSON.parse(headers), ...(localAddress && { localAddress }), timeout: 5000 }, response => {
   const chunks = [];
   response.on('data', chunk => chunks.push(chunk));
   response.on('end', () => {
@@ -65,7 +66,7 @@ const request = http.request({ host: '127.0.0.1', port: 8080, method, path, head
     const encoding = response.headers['content-encoding'];
     let decoded = raw;
     try { decoded = encoding === 'br' ? zlib.brotliDecompressSync(raw) : encoding === 'gzip' ? zlib.gunzipSync(raw) : raw; } catch {}
-    console.log(JSON.stringify({ status: response.statusCode, headers: response.headers, body: raw.toString('utf8'), decoded: decoded.toString('utf8') }));
+    console.log(JSON.stringify({ status: response.statusCode, headers: response.headers, raw: response.rawHeaders, body: raw.toString('utf8'), decoded: decoded.toString('utf8') }));
   });
 });
 request.on('timeout', () => request.destroy(new Error('timeout')));
@@ -76,7 +77,7 @@ probe() {
     local container="$1"; shift
     docker exec "$container" node -e "$PROBE" "$@"
 }
-# expect <name> <container> <jq-filter> <method> <path> [headers-json]
+# expect <name> <container> <jq-filter> <method> <path> [headers-json [source-address]]
 expect() {
     local name="$1" container="$2" filter="$3"; shift 3
     local out
@@ -87,6 +88,17 @@ wait_healthy() {
     for i in $(seq 1 60); do
         docker exec "$1" node /etc/nginx-nodejs/healthcheck.mjs >/dev/null 2>&1 && return 0
         [ "$(docker inspect -f '{{.State.Running}}' "$1")" = true ] || return 1
+        sleep 1
+    done
+    return 1
+}
+# jq helper for filters: how many times the response carried header $k.
+HDR='def n($k): [range(0; .raw | length; 2) as $i | .raw[$i] | ascii_downcase | select(. == $k)] | length;'
+once='n("x-content-type-options") == 1 and n("x-frame-options") == 1 and n("referrer-policy") == 1 and n("x-request-id") == 1 and n("cache-control") == 1'
+wait_health_status() {
+    local i
+    for i in $(seq 1 60); do
+        [ "$(docker inspect -f '{{.State.Health.Status}}' "$1")" = healthy ] && return 0
         sleep 1
     done
     return 1
@@ -108,26 +120,35 @@ HARDENED_FLAGS=(--read-only --cap-drop ALL --security-opt no-new-privileges --pi
 command -v readelf >/dev/null || { echo "readelf (binutils) is required on the host" >&2; exit 2; }
 elf_dir="$(mktemp -d)"
 elf_source="$(docker create --label "$LABEL" "$IMAGE")"
-for elf in /usr/bin/fluent-bit /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so /usr/lib/nginx/modules/ngx_http_brotli_static_module.so; do
-    docker cp "$elf_source:$elf" "$elf_dir/" >/dev/null
+nginx_modules=(ngx_http_brotli_filter_module ngx_http_brotli_static_module ngx_http_headers_more_filter_module)
+docker cp "$elf_source:/usr/bin/fluent-bit" "$elf_dir/" >/dev/null
+for module in "${nginx_modules[@]}"; do
+    docker cp "$elf_source:/usr/lib/nginx/modules/$module.so" "$elf_dir/" >/dev/null
 done
 docker rm "$elf_source" >/dev/null
 machine="$(readelf -hW "$elf_dir/fluent-bit" | sed -n 's/^ *Machine: *//p')"
 
-# elf_hardened <file>: PIE/PIC (ET_DYN), full RELRO, non-executable stack, stack protector.
+# elf_hardened <file> <exe|so>: PIE (executables) or no text relocations (shared objects), full
+# RELRO, non-executable stack, stack protector.
 # Output is captured before grepping: under pipefail, `readelf | grep -q` fails on SIGPIPE.
 elf_hardened() {
-    local file="$1" header program dynamic symbols
+    local file="$1" kind="$2" header program dynamic symbols
     header="$(readelf -hW "$file")" && program="$(readelf -lW "$file")" \
         && dynamic="$(readelf -dW "$file")" && symbols="$(readelf -sW --dyn-syms "$file")" || return 1
     grep -q 'Program Headers:' <<<"$program" || return 1
-    grep -qE '^ *Type: +DYN' <<<"$header" || return 1
+    if [ "$kind" = exe ]; then
+        grep -qE '^ *Type: +DYN \(Position-Independent Executable' <<<"$header" || return 1
+    else
+        grep -qE '^ *Type: +DYN \(Shared object' <<<"$header" || return 1
+        ! grep -q 'TEXTREL' <<<"$dynamic" || return 1
+    fi
     grep -q 'GNU_RELRO' <<<"$program" || return 1
     grep -qE 'BIND_NOW|FLAGS_1.*\bNOW\b' <<<"$dynamic" || return 1
     grep -qE 'GNU_STACK.* RW +' <<<"$program" || return 1
     grep -q '__stack_chk_fail' <<<"$symbols" || return 1
 }
-# elf_fortified <file>: fortified libc calls, i.e. __*_chk among the dynamic symbols.
+# elf_fortified <file>: fortified libc calls, i.e. __*_chk among the dynamic symbols. This shows
+# that fortification was on (any level); it cannot tell _FORTIFY_SOURCE=1 from 3.
 elf_fortified() {
     local symbols
     symbols="$(readelf -sW --dyn-syms "$1")" || return 1
@@ -141,8 +162,16 @@ elf_ibt() {
 }
 check "fluent-bit: PIE, full RELRO, non-exec stack, stack protector" elf_hardened "$elf_dir/fluent-bit" exe
 check "fluent-bit: fortified libc calls (__*_chk imports)" elf_fortified "$elf_dir/fluent-bit"
-for module in ngx_http_brotli_filter_module ngx_http_brotli_static_module; do
-    check "$module.so: PIC, full RELRO, non-exec stack, stack protector" elf_hardened "$elf_dir/$module.so" so
+for module in "${nginx_modules[@]}"; do
+    check "$module.so: no text relocations, full RELRO, non-exec stack, stack protector" elf_hardened "$elf_dir/$module.so" so
+    # Fortification only shows as __*_chk imports when the compiler could not prove a size; a module
+    # without any has nothing to observe, so only a module that imports them is asserted.
+    module_symbols="$(readelf -sW --dyn-syms "$elf_dir/$module.so")"
+    if grep -qE ' __[a-z_0-9]+_chk(@| |$)' <<<"$module_symbols"; then
+        check "$module.so: fortified libc calls (__*_chk imports)" elf_fortified "$elf_dir/$module.so"
+    else
+        echo "skip - $module.so: no fortifiable libc imports to observe"
+    fi
 done
 if grep -q 'X86-64' <<<"$machine"; then
     check "fluent-bit: IBT landing-pad note" elf_ibt "$elf_dir/fluent-bit"
@@ -178,6 +207,11 @@ printf '<svg xmlns="http://www.w3.org/2000/svg">%s</svg>\n' "$(printf '<rect wid
 printf 'license text\n' > "$public/LICENSE"
 printf '<!doctype html><title>docs</title>\n' > "$public/docs/index.html"
 printf '{}\n' > "$public/assets/app.0123abcd.js.map"
+# Symlinks: one to a root-owned file outside the root (must not be served), one to a file of the
+# same owner inside it (may be). Root-owned links would be same-owner as /etc/passwd, so skip as root.
+ln -s /etc/passwd "$public/leak.txt"
+ln -s /etc/passwd "$public/assets/leak.js"
+ln -s LICENSE "$public/license-link"
 printf 'SECRET=1\n' > "$public/.env"
 printf 'module.exports = 1;\n' > "$public/node_modules/pkg/index.js"
 cat > "$fixture/server.mjs" <<'JS'
@@ -194,6 +228,9 @@ const server = createServer((request, response) => {
     case '/connections':
       response.writeHead(200);
       return response.end(String(connections));
+    case '/node-options':
+      response.writeHead(200);
+      return response.end(JSON.stringify({ options: process.env.NODE_OPTIONS ?? null, appOptions: process.env.NODE_APP_OPTIONS ?? null }));
     case '/ready':
       response.writeHead(200);
       return response.end('ready');
@@ -227,6 +264,9 @@ server.on('upgrade', (request, socket) => {
   socket.end('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nupgraded');
 });
 server.listen(port, process.env.HOST);
+JS
+cat > "$fixture/marker.cjs" <<'JS'
+require('node:fs').appendFileSync('/tmp/markers', `${process.argv[1] ?? '-e'}\n`);
 JS
 cat > "$fixture/filters.json" <<'JSON'
 [{"name":"modify","add":"application fixture","rename":"durationMs duration_ms"}]
@@ -282,8 +322,22 @@ expect "precompressed .br sibling preferred" "$app" '.headers["content-encoding"
 expect "byte range on a precompressed .gz sibling" "$app" '.status == 206 and .headers["content-encoding"] == "gzip" and (.headers["content-range"] | startswith("bytes 0-4/"))' GET /assets/app.0123abcd.js '{"Accept-Encoding":"gzip","Range":"bytes=0-4"}'
 expect "byte range on a precompressed .br sibling" "$app" '.status == 206 and .headers["content-encoding"] == "br" and (.headers["content-range"] | startswith("bytes 0-4/"))' GET /assets/app.0123abcd.js '{"Accept-Encoding":"br","Range":"bytes=0-4"}'
 expect "unsatisfiable range on a .br sibling is a plain 416" "$app" '.status == 416 and (.headers["content-encoding"] == null)' GET /assets/app.0123abcd.js '{"Accept-Encoding":"br","Range":"bytes=99999-"}'
+expect "multi-range request is served whole (max_ranges 1), not as multipart" "$app" '.status == 200 and .body == "license text\n" and .headers["content-type"] == "application/octet-stream"' GET /LICENSE '{"Range":"bytes=0-1,3-4"}'
 expect "Range request still falls back to Node" "$app" '.status == 200 and (.body | fromjson | .port == 3007)' GET /echo '{"Range":"bytes=0-9"}'
 expect "container health route answers on loopback" "$app" '.status == 200' GET /__container_health
+expect "container health route refuses another peer address" "$app" '.status == 404' GET /__container_health '{}' 127.0.0.2
+expect "each header once on a static 200" "$app" "$HDR"' .status == 200 and '"$once"' and .headers["cache-control"] == "public, max-age=31536000, immutable" and .headers["x-content-type-options"] == "nosniff"' GET /assets/app.0123abcd.js
+expect "each header once on an unsatisfiable static range (416), Cache-Control no-store" "$app" "$HDR"' .status == 416 and '"$once"' and .headers["cache-control"] == "no-store" and .headers["x-content-type-options"] == "nosniff" and .headers["x-frame-options"] == "SAMEORIGIN" and .headers["referrer-policy"] == "strict-origin-when-cross-origin"' GET /assets/app.0123abcd.js '{"Range":"bytes=99999-"}'
+expect "each header once on a 416 for a non-asset static file" "$app" "$HDR"' .status == 416 and '"$once"' and .headers["cache-control"] == "no-store"' GET /LICENSE '{"Range":"bytes=99999-"}'
+expect "each header once on a 206 static response" "$app" "$HDR"' .status == 206 and '"$once"' and .headers["cache-control"] == "public, max-age=31536000, immutable"' GET /assets/app.0123abcd.js '{"Range":"bytes=0-4"}'
+expect "each header once on a static 404" "$app" "$HDR"' .status == 404 and '"$once"' and .headers["cache-control"] == "no-store"' GET /assets/missing.js
+expect "each header once on a Node response" "$app" "$HDR"' .status == 200 and '"$once"' and .headers["cache-control"] == "public, max-age=60"' GET /cached
+expect "each header once on a Node error" "$app" "$HDR"' .status == 500 and '"$once"' and .headers["cache-control"] == "no-store"' GET /boom
+if [ "$(id -u)" != 0 ]; then
+    expect "symlink out of STATIC_ROOT is not served (served by Node as 404)" "$app" '.status == 404 and (.body | contains("root:") | not)' GET /leak.txt
+    expect "symlink out of STATIC_ROOT under /assets/ is 404" "$app" '.status == 404 and (.body | contains("root:") | not)' GET /assets/leak.js
+fi
+expect "symlink to a file of the same owner inside the root is served" "$app" '.status == 200 and .body == "license text\n"' GET /license-link
 check "WebSocket upgrade passes through" docker exec "$app" node -e "
 const http = require('node:http');
 http.request({ host: '127.0.0.1', port: 8080, path: '/ws', headers: { Connection: 'Upgrade', Upgrade: 'websocket' }, timeout: 5000 })
@@ -344,6 +398,47 @@ check "override: healthcheck passes" wait_healthy "$override"
 check "override: NGINX_WORKER_PROCESSES=3 gives 3 workers" test "$(workers "$override")" = 3
 expect "override: NODE_MAX_OLD_SPACE_SIZE=96 caps the app heap" "$override" '(.body | tonumber) > 90000000 and (.body | tonumber) < 160000000' GET /heap
 docker rm -f "$override" >/dev/null
+
+# Node accepts underscores in option names; a heap flag in either spelling, from NODE_OPTIONS or the
+# command, must win over the derived one (512 MB would otherwise give about 264 MB).
+heap_variants=("underscore NODE_OPTIONS|-e NODE_OPTIONS=--max_old_space_size=96|node /fixture/server.mjs"
+    "mixed NODE_OPTIONS|-e NODE_OPTIONS=--max-old_space-size=96|node /fixture/server.mjs"
+    "underscore command flag||node --max_old_space_size=96 /fixture/server.mjs")
+for variant in "${heap_variants[@]}"; do
+    IFS='|' read -r label env_args command <<<"$variant"
+    # shellcheck disable=SC2086
+    heap_app="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 --cpus 2 --memory 512m --read-only \
+        --tmpfs /run/nginx-nodejs:uid=1000,gid=1000,mode=0700 --tmpfs /tmp:uid=1000,gid=1000,mode=1777 \
+        --tmpfs /var/lib/nginx-nodejs:uid=1000,gid=1000,mode=0700 -v "$fixture:/fixture:ro" \
+        -e APP_DIR=/fixture -e STATIC_ROOT=/fixture/.output/public -e NODE_PORT=3007 -e NODE_HEALTH_PATH=/ready \
+        $env_args "$IMAGE" $command)"
+    check "heap flag ($label): healthcheck passes" wait_healthy "$heap_app"
+    expect "heap flag ($label): the user's 96 MB wins over the derived value" "$heap_app" '(.body | tonumber) > 90000000 and (.body | tonumber) < 160000000' GET /heap
+    docker rm -f "$heap_app" >/dev/null
+done
+
+# NODE_OPTIONS (for example an APM --require) belongs to the app process only: the supervisor, the
+# helper Node processes and the image HEALTHCHECK must not load it. marker.cjs logs every process it loads in.
+options_app="$(docker run -d --init --network none --label "$LABEL" --stop-timeout 45 "${HARDENED_FLAGS[@]}" \
+    --tmpfs /var/lib/nginx-nodejs:uid=1000,gid=1000,mode=0700 --health-interval 2s --health-start-interval 1s \
+    -v "$fixture:/fixture:ro" -e APP_DIR=/fixture -e STATIC_ROOT=/fixture/.output/public \
+    -e NODE_PORT=3007 -e NODE_HEALTH_PATH=/ready -e LOKI_ENABLED=0 \
+    -e INGRESS_TRUSTED_IPS=127.0.0.2 -e 'NODE_OPTIONS=--require /fixture/marker.cjs' \
+    "$IMAGE" node /fixture/server.mjs)"
+check "NODE_OPTIONS: container becomes healthy through the image HEALTHCHECK" wait_health_status "$options_app"
+sleep 3
+markers="$(docker exec "$options_app" cat /tmp/markers 2>/dev/null || true)"
+check "NODE_OPTIONS: the app process loads it" grep -qx /fixture/server.mjs <<<"$markers"
+check "NODE_OPTIONS: no helper or HEALTHCHECK process loads it${markers:+ (loaded by: $(tr '\n' ' ' <<<"$markers"))}" \
+    sh -c '! grep -E "/etc/nginx-nodejs/" <<<"$1"' sh "$markers"
+expect "NODE_OPTIONS: the app gets the user's value and no internal variable" "$options_app" \
+    '.body | fromjson | .options == "--require /fixture/marker.cjs" and .appOptions == null' GET /node-options
+# Trusting 127.0.0.2 as ingress lets it name the client with X-Forwarded-For; /__container_health must
+# still judge the TCP peer, so a forged 127.0.0.1 from that peer does not open it.
+expect "container health route: loopback peer still answers" "$options_app" '.status == 200' GET /__container_health
+expect "container health route: trusted ingress peer forging X-Forwarded-For 127.0.0.1 gets 404" "$options_app" \
+    '.status == 404' GET /__container_health '{"X-Forwarded-For":"127.0.0.1"}' 127.0.0.2
+docker rm -f "$options_app" >/dev/null
 
 # ------------------------------------------------------- config validation
 for args in "-e NODE_PORT=8080 $IMAGE" "-e RUNTIME_MODE=staging $IMAGE" "$IMAGE sh -c true" \
