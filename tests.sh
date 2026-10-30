@@ -430,7 +430,7 @@ sleep 3
 markers="$(docker exec "$options_app" cat /tmp/markers 2>/dev/null || true)"
 check "NODE_OPTIONS: the app process loads it" grep -qx /fixture/server.mjs <<<"$markers"
 check "NODE_OPTIONS: no helper or HEALTHCHECK process loads it${markers:+ (loaded by: $(tr '\n' ' ' <<<"$markers"))}" \
-    sh -c '! grep -E "/etc/nginx-nodejs/" <<<"$1"' sh "$markers"
+    bash -c '! grep -E "/etc/nginx-nodejs/" <<<"$1"' bash "$markers"
 expect "NODE_OPTIONS: the app gets the user's value and no internal variable" "$options_app" \
     '.body | fromjson | .options == "--require /fixture/marker.cjs" and .appOptions == null' GET /node-options
 # Trusting 127.0.0.2 as ingress lets it name the client with X-Forwarded-For; /__container_health must
