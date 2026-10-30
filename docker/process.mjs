@@ -88,11 +88,15 @@ function safeLine(line, oversized = false) {
 // Under a cgroup v2 memory limit, cap the V8 heap below it so the app is collected before the kernel kills the container.
 // The allowance covers Nginx, the helper Node processes and the collector, which share the limit.
 const reservedMb = 160;
+// entrypoint.sh moves the user's NODE_OPTIONS to NODE_APP_OPTIONS so the helper Node processes ignore it; only the app gets it back.
+const appNodeOptions = process.env.NODE_APP_OPTIONS || '';
+// Node accepts dashes or underscores in option names, mixed or not.
+const heapFlag = /(?:^|\s)--max[-_]old[-_]space[-_]size(?:[=\s]|$)/;
 function appHeapOptions() {
   const setting = process.env.NODE_MAX_OLD_SPACE_SIZE || '';
   if (setting === 'off') return '';
   if (setting) return `--max-old-space-size=${Number(setting)}`;
-  if ((process.env.NODE_OPTIONS || '').includes('--max-old-space-size') || nodeCommand.some(value => value.startsWith('--max-old-space-size'))) return '';
+  if (heapFlag.test(appNodeOptions) || nodeCommand.some(value => heapFlag.test(value))) return '';
   try {
     const limit = readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
     if (!/^\d+$/.test(limit)) return '';
@@ -100,9 +104,10 @@ function appHeapOptions() {
   } catch { return ''; }
 }
 const environment = { ...process.env, ...collectorEnvironment, HOST: '127.0.0.1', PORT: process.env.NODE_PORT || '3000', NO_COLOR: '1' };
+delete environment.NODE_APP_OPTIONS;
 if (service === 'node') {
-  const heap = appHeapOptions();
-  if (heap) environment.NODE_OPTIONS = [process.env.NODE_OPTIONS, heap].filter(Boolean).join(' ');
+  const options = [appNodeOptions, appHeapOptions()].filter(Boolean).join(' ');
+  if (options) environment.NODE_OPTIONS = options;
 }
 const [command, args] = commands[service];
 const child = spawn(command, args, { cwd: service === 'node' ? app : '/', env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
