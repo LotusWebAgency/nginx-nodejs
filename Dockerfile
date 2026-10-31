@@ -5,9 +5,9 @@ ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:88a20e2d017bd20cdc0c
 # Vendored components compiled from source. Declared here so the runtime stage can record them
 # in OCI labels; the stages that use them redeclare them.
 # renovate: datasource=github-tags depName=fluent/fluent-bit
-ARG FLUENT_BIT_VERSION=5.0.7
+ARG FLUENT_BIT_VERSION=5.1.5
 # sha256 of the codeload tarball: update it by hand in the same PR as the version.
-ARG FLUENT_BIT_SHA256=a760cdce272d6025100346d27315cc03a9b3466e5a8a24aaae6f2ad6a9cda29f
+ARG FLUENT_BIT_SHA256=de18660c0d8b077289d29cec6da6d8956b212b4ce75a58e2debe9be78286c621
 ARG NGX_BROTLI_COMMIT=53e0fb55f250f48fe80c0ddbf6c0f7103cdbaae1
 ARG NGX_BROTLI_SHA256=27a4352dae4ba4922f9f013f3f0d02359aceeef2701872efa42849c3ba05457a
 # headers-more v0.41: more_set_headers replaces a header instead of appending, which add_header
