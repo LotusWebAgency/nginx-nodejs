@@ -1,7 +1,7 @@
-# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
+# syntax=docker/dockerfile:1.29@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 # Renovate refreshes the digest; CI verifies its Chainguard signature before building on it.
 # `apk upgrade` below still refreshes packages on every rebuild.
-ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:24f549a7fcace88e69b9557941168c74645688ecc4acf7fb6d734a6b74e9019d
+ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:580c9ae79c0229cc381475fbfbed0d91fab5d6606e57cd78732f9836de109e90
 # Vendored components compiled from source. Declared here so the runtime stage can record them
 # in OCI labels; the stages that use them redeclare them.
 # renovate: datasource=github-tags depName=fluent/fluent-bit
