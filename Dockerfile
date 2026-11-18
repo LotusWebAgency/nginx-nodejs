@@ -1,13 +1,13 @@
-# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
+# syntax=docker/dockerfile:1.29@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 # Renovate refreshes the digest; CI verifies its Chainguard signature before building on it.
 # `apk upgrade` below still refreshes packages on every rebuild.
-ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:24f549a7fcace88e69b9557941168c74645688ecc4acf7fb6d734a6b74e9019d
+ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:580c9ae79c0229cc381475fbfbed0d91fab5d6606e57cd78732f9836de109e90
 # Vendored components compiled from source. Declared here so the runtime stage can record them
 # in OCI labels; the stages that use them redeclare them.
 # renovate: datasource=github-tags depName=fluent/fluent-bit
-ARG FLUENT_BIT_VERSION=5.1.5
+ARG FLUENT_BIT_VERSION=5.2.0
 # sha256 of the codeload tarball: update it by hand in the same PR as the version.
-ARG FLUENT_BIT_SHA256=de18660c0d8b077289d29cec6da6d8956b212b4ce75a58e2debe9be78286c621
+ARG FLUENT_BIT_SHA256=7f1b92ed09e43c33d8c572bc1643ad0e797f129286468faf85ac56beed6cccad
 ARG NGX_BROTLI_COMMIT=53e0fb55f250f48fe80c0ddbf6c0f7103cdbaae1
 ARG NGX_BROTLI_SHA256=27a4352dae4ba4922f9f013f3f0d02359aceeef2701872efa42849c3ba05457a
 # headers-more v0.41: more_set_headers replaces a header instead of appending, which add_header
