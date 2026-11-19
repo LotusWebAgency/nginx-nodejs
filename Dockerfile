@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.29@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 # Renovate refreshes the digest; CI verifies its Chainguard signature before building on it.
 # `apk upgrade` below still refreshes packages on every rebuild.
-ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:580c9ae79c0229cc381475fbfbed0d91fab5d6606e57cd78732f9836de109e90
+ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9
 # Vendored components compiled from source. Declared here so the runtime stage can record them
 # in OCI labels; the stages that use them redeclare them.
 # renovate: datasource=github-tags depName=fluent/fluent-bit
@@ -10,10 +10,10 @@ ARG FLUENT_BIT_VERSION=5.2.0
 ARG FLUENT_BIT_SHA256=7f1b92ed09e43c33d8c572bc1643ad0e797f129286468faf85ac56beed6cccad
 ARG NGX_BROTLI_COMMIT=53e0fb55f250f48fe80c0ddbf6c0f7103cdbaae1
 ARG NGX_BROTLI_SHA256=27a4352dae4ba4922f9f013f3f0d02359aceeef2701872efa42849c3ba05457a
-# headers-more v0.41: more_set_headers replaces a header instead of appending, which add_header
+# headers-more v0.42: more_set_headers replaces a header instead of appending, which add_header
 # cannot do when Nginx re-runs the header filters for a 416.
-ARG HEADERS_MORE_COMMIT=21066f7eed72e4de4f6ec47b93e8d5f36c38b84a
-ARG HEADERS_MORE_SHA256=52f3f4dc1b34efa887155e92398052bf477702b2753585fe3482e2dd0136ea62
+ARG HEADERS_MORE_COMMIT=e30b10e0bb1cfb042d76ba3a865410ff95d65660
+ARG HEADERS_MORE_SHA256=7ae52431c2dd9dd98970d05b4b017e55b9261af1bdfdbf827633daf730503503
 # Busybox's raw-socket and interface applets give an attacker with code execution a ready-made
 # network toolbox and nothing here uses them. Wolfi's busybox already omits nc, wget, telnet,
 # ftp*, tftp and httpd; the rest are pruned again after every `apk add`, because busybox's apk
