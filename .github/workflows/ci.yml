@@ -55,16 +55,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Three Node majors x two targets. The newest major also carries the
+        # Two Node majors x two targets. The newest major also carries the
         # unversioned `latest` / `builder` tags.
         include:
-          - node: "22"
-            target: runtime
-            suffix: ""
-            title: nginx-nodejs
-            description: Rootless Node.js runtime behind Nginx — static files, Brotli/gzip, caching, s6 supervision and sanitized logs with optional Loki delivery.
-            tags: |
-              type=raw,value=22
           - node: "24"
             target: runtime
             suffix: ""
@@ -80,13 +73,6 @@ jobs:
             tags: |
               type=raw,value=26
               type=raw,value=latest
-          - node: "22"
-            target: builder
-            suffix: "-builder"
-            title: nginx-nodejs builder
-            description: Node.js and npm build stage matching the nginx-nodejs runtime, for multi-stage application builds.
-            tags: |
-              type=raw,value=22-builder
           - node: "24"
             target: builder
             suffix: "-builder"

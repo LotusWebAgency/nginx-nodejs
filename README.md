@@ -31,10 +31,10 @@ Pick a Node.js major with the tag. `latest` and `builder` are the newest major (
 | Tag | Contents |
 |---|---|
 | `latest`, `26` | The runtime image on Node.js 26. Moves on every merge to `main` and on the weekly rebuild. |
-| `24`, `22` | The runtime image on that Node.js major. |
-| `26.12.1`, `26.12` | The runtime image with that exact Node.js version, or the newest patch of that minor (examples; the tags follow the Node in the image). The same forms exist for 24 and 22. |
+| `24` | The runtime image on Node.js 24. |
+| `26.12.1`, `26.12` | The runtime image with that exact Node.js version, or the newest patch of that minor (examples; the tags follow the Node in the image). The same forms exist for 24. |
 | `builder`, `26-builder` | The build-stage image on Node.js 26: Node.js and npm, no Nginx. |
-| `24-builder`, `22-builder` | The builder on that Node.js major. |
+| `24-builder` | The builder on Node.js 24. |
 | `26.12.1-builder`, `26.12-builder` | The version tags for the builder (examples). |
 
 Use the same major for both stages, so you build and run on the same Node.js:
@@ -48,9 +48,11 @@ FROM lotuswebagency/nginx-nodejs:24
 
 | Node.js | Status in October 2026 | Upstream end of life |
 |---|---|---|
-| 22 | Maintenance LTS | 2027-04-30 |
 | 24 | Maintenance LTS (since 2026-10-20) | 2028-04-30 |
 | 26 | Active LTS (since 2026-10-28) | 2029-04-30 |
+
+Node.js 22 is no longer built. Its `22`, `22-builder` and `22.x` version tags stay pullable but
+get no rebuilds or CVE fixes: move to 24 or 26.
 
 Dates are from the [Node.js release schedule](https://github.com/nodejs/Release/blob/main/schedule.json).
 
@@ -75,7 +77,7 @@ keyless Cosign signature. See [Security and provenance](#security-and-provenance
 ## What is inside
 
 - **Wolfi** base (`cgr.dev/chainguard/wolfi-base`), pinned by digest in the Dockerfile and
-  refreshed by Renovate after CI verifies its Chainguard signature. Node.js 22, 24 or 26 comes
+  refreshed by Renovate after CI verifies its Chainguard signature. Node.js 24 or 26 comes
   from the Wolfi `nodejs-<major>` package; `apk upgrade` runs on every rebuild.
 - **Nginx** (Wolfi `nginx-mainline`) with the **ngx_brotli** filter and static modules.
   ngx_brotli is built from a pinned upstream commit, checked by SHA-256, against the
@@ -508,13 +510,13 @@ which are compiled from source. Their versions are recorded in the image labels
 
 `.github/workflows/ci.yml` is a thin caller of the shared reusable workflow in
 [`LotusWebAgency/docker-workflows`](https://github.com/LotusWebAgency/docker-workflows), pinned to
-`@v1`, with a matrix of three Node.js majors (22, 24, 26) by two targets (`runtime`, `builder`):
-six builds, each tested with `NODE_MAJOR` set so the image must run that major.
+`@v1`, with a matrix of two Node.js majors (24, 26) by two targets (`runtime`, `builder`):
+four builds, each tested with `NODE_MAJOR` set so the image must run that major.
 
 1. A `verify-base` job checks the Cosign signature of the pinned Wolfi digest. Then pull
    requests build `linux/amd64`, run `tests.sh` against the built image, then the Trivy
    vulnerability, KEV and license gates. Nothing is published.
-2. Merging to `main` publishes the major tags (`22`, `24`, `26`, `22-builder`, ...), `latest`
+2. Merging to `main` publishes the major tags (`24`, `26`, `24-builder`, `26-builder`), `latest`
    and `builder` (Node.js 26) and the version tags, with the SBOM,
    provenance and Cosign signature, and syncs [DOCKERHUB.md](DOCKERHUB.md) to the Docker Hub
    description.
@@ -585,7 +587,7 @@ IMAGE=nginx-nodejs:builder TARGET=builder ./tests.sh
 ```
 
 The default is Node.js 26. Choose another major with the `NODE_MAJOR` build argument
-(`22`, `24` or `26`), and set the same variable for the tests to assert it:
+(`24` or `26`), and set the same variable for the tests to assert it:
 
 ```sh
 docker buildx build --load --network host --build-arg NODE_MAJOR=24 --target runtime -t nginx-nodejs:node24 .

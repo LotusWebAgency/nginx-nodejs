@@ -10,10 +10,10 @@ Pick a Node.js major with the tag. `latest` and `builder` are the newest major (
 | Tag | Contents |
 |---|---|
 | `latest`, `26` | The runtime image on Node.js 26. Moves on every merge to `main` and on the weekly rebuild. |
-| `24`, `22` | The runtime image on that Node.js major. |
-| `26.12.1`, `26.12` | The runtime image with that exact Node.js version (an example), republished in place, with a new digest and the same tag, while that version is current; or the newest patch release of that minor. The same forms exist for 24 and 22. |
+| `24` | The runtime image on Node.js 24. |
+| `26.12.1`, `26.12` | The runtime image with that exact Node.js version (an example), republished in place, with a new digest and the same tag, while that version is current; or the newest patch release of that minor. The same forms exist for 24. |
 | `builder`, `26-builder` | The build-stage image on Node.js 26, with Node.js and npm. |
-| `24-builder`, `22-builder` | The builder on that Node.js major. |
+| `24-builder` | The builder on Node.js 24. |
 | `26.12.1-builder`, `26.12-builder` | The version tags for the builder (examples). |
 
 Version tags are read out of the built image (`node -p process.versions.node`) after the
@@ -23,9 +23,11 @@ tests and the Trivy gate. A tag cannot claim a version the image does not run.
 
 | Node.js | Status in October 2026 | Upstream end of life |
 |---|---|---|
-| 22 | Maintenance LTS | 2027-04-30 |
 | 24 | Maintenance LTS (since 2026-10-20) | 2028-04-30 |
 | 26 | Active LTS (since 2026-10-28) | 2029-04-30 |
+
+Node.js 22 is no longer built. Its `22`, `22-builder` and `22.x` version tags stay pullable but
+get no rebuilds or CVE fixes: move to 24 or 26.
 
 Dates are from the [Node.js release schedule](https://github.com/nodejs/Release/blob/main/schedule.json).
 The image does not extend them: plan to move to a newer major before the end-of-life date of

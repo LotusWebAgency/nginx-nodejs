@@ -28,10 +28,10 @@ Pick a Node.js major with the tag. `latest` and `builder` are the newest major (
 | Tag | Contents |
 |---|---|
 | `latest`, `26` | The runtime image on Node.js 26. Moves on every merge to `main` and on the weekly rebuild. |
-| `24`, `22` | The runtime image on that Node.js major. |
-| `26.12.1`, `26.12` | The runtime image with that exact Node.js version, or the newest patch of that minor (examples; the tags follow the Node in the image). The same forms exist for 24 and 22. |
+| `24` | The runtime image on Node.js 24. |
+| `26.12.1`, `26.12` | The runtime image with that exact Node.js version, or the newest patch of that minor (examples; the tags follow the Node in the image). The same forms exist for 24. |
 | `builder`, `26-builder` | The build-stage image on Node.js 26: Node.js and npm, no Nginx. |
-| `24-builder`, `22-builder` | The builder on that Node.js major. |
+| `24-builder` | The builder on Node.js 24. |
 | `26.12.1-builder`, `26.12-builder` | The version tags for the builder (examples). |
 
 Use the same major for both stages, so you build and run on the same Node.js:
@@ -45,9 +45,10 @@ FROM lotuswebagency/nginx-nodejs:24
 
 | Node.js | Status in October 2026 | Upstream end of life |
 |---|---|---|
-| 22 | Maintenance LTS | 2027-04-30 |
 | 24 | Maintenance LTS (since 2026-10-20) | 2028-04-30 |
 | 26 | Active LTS (since 2026-10-28) | 2029-04-30 |
+
+Node.js 22 is no longer built; its tags get no rebuilds or CVE fixes.
 
 Dates are from the [Node.js release schedule](https://github.com/nodejs/Release/blob/main/schedule.json).
 
@@ -72,7 +73,7 @@ keyless Cosign signature. Tag policy:
 ## What is inside
 
 - **Wolfi** base (`cgr.dev/chainguard/wolfi-base`), pinned by digest and verified against
-  Chainguard's signature in CI. Node.js 22, 24 or 26 from the Wolfi `nodejs-<major>` package.
+  Chainguard's signature in CI. Node.js 24 or 26 from the Wolfi `nodejs-<major>` package.
 - **Nginx** (Wolfi `nginx-mainline`) with the **ngx_brotli** filter and static modules,
   built from a pinned upstream commit, checked by SHA-256, with a local patch for byte
   ranges and `416` responses, plus **headers-more**, so a `416` carries each security header once.
