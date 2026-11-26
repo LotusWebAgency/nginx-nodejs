@@ -1,0 +1,23 @@
+name: cache-cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Print the plan, delete nothing"
+        type: boolean
+        default: true
+  schedule:
+    - cron: "30 0 * * *" # daily, after the UTC scope rotation and away from the Monday rebuild
+
+permissions: {}
+
+jobs:
+  cleanup:
+    uses: LotusWebAgency/docker-workflows/.github/workflows/cache-cleanup.yml@v1
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    with:
+      dry-run: ${{ inputs.dry-run == true }}
